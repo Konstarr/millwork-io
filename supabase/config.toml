@@ -1,0 +1,8 @@
+# Supabase CLI project config. The project_id is a local nickname only —
+# the actual project ref is supplied via `supabase link --project-ref <REF>`
+# in the CI workflow, using the SUPABASE_PROJECT_ID GitHub secret.
+project_id = "millwork-io"
+
+[db]
+# Match Supabase Cloud (Postgres 15). Bump when Supabase upgrades.
+major_version = 15
