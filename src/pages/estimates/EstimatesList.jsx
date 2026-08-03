@@ -1,29 +1,24 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
-import { useOrg } from '../../context/OrgContext.jsx';
-
 export default function EstimatesList() {
-  const { activeOrg } = useOrg();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState('');
   const nav = useNavigate();
 
   useEffect(() => {
-    if (!activeOrg?.id) return;
     let cancelled = false;
     (async () => {
       setLoading(true);
       const { data } = await supabase
         .from('estimates')
         .select('id, name, status, total_amount, updated_at, project:project_id(id, name, customer:customer_id(name))')
-        .eq('org_id', activeOrg.id)
         .order('updated_at', { ascending: false });
       if (!cancelled) { setRows(data || []); setLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [activeOrg?.id]);
+  }, []);
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();

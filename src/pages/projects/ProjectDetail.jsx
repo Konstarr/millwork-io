@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
-import { useOrg } from '../../context/OrgContext.jsx';
-
 const EMPTY = {
   name: '',
   customer_id: '',
@@ -18,7 +16,6 @@ const STATUSES = ['draft', 'bidding', 'awarded', 'in-progress', 'complete', 'los
 export default function ProjectDetail() {
   const { id }        = useParams();
   const isNew         = id === 'new';
-  const { activeOrg } = useOrg();
   const nav           = useNavigate();
 
   const [form, setForm]         = useState(EMPTY);
@@ -30,10 +27,9 @@ export default function ProjectDetail() {
   const [msg, setMsg]           = useState('');
 
   useEffect(() => {
-    if (!activeOrg?.id) return;
     let cancelled = false;
     (async () => {
-      const c = await supabase.from('customers').select('id, name').eq('org_id', activeOrg.id).order('name');
+      const c = await supabase.from('customers').select('id, name').order('name');
       if (!cancelled) setCustomers(c.data || []);
 
       if (isNew) { setLoading(false); return; }
@@ -48,7 +44,7 @@ export default function ProjectDetail() {
       setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [id, isNew, activeOrg?.id]);
+  }, [id, isNew]);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -62,7 +58,7 @@ export default function ProjectDetail() {
     };
     if (isNew) {
       const { data, error } = await supabase
-        .from('projects').insert({ ...payload, org_id: activeOrg.id })
+        .from('projects').insert(payload)
         .select('id').single();
       setSaving(false);
       if (error) { setErr(error.message); return; }

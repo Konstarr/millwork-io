@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
-import { useOrg } from '../../context/OrgContext.jsx';
-
 const EMPTY = {
   name: '', contact_name: '', email: '', phone: '',
   address1: '', address2: '', city: '', state: '', postal_code: '',
@@ -12,7 +10,6 @@ const EMPTY = {
 export default function CustomerDetail() {
   const { id }         = useParams();
   const isNew          = id === 'new';
-  const { activeOrg }  = useOrg();
   const nav            = useNavigate();
   const [form, setForm]= useState(EMPTY);
   const [loading, setLoading] = useState(!isNew);
@@ -21,7 +18,7 @@ export default function CustomerDetail() {
   const [msg, setMsg]         = useState('');
 
   useEffect(() => {
-    if (isNew || !activeOrg?.id) return;
+    if (isNew) return;
     let cancelled = false;
     (async () => {
       const { data, error } = await supabase
@@ -35,7 +32,7 @@ export default function CustomerDetail() {
       setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [id, isNew, activeOrg?.id]);
+  }, [id, isNew]);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -43,8 +40,7 @@ export default function CustomerDetail() {
     e.preventDefault();
     setSaving(true); setErr(''); setMsg('');
     if (isNew) {
-      const insert = { ...form, org_id: activeOrg.id };
-      const { data, error } = await supabase.from('customers').insert(insert).select('id').single();
+      const { data, error } = await supabase.from('customers').insert(form).select('id').single();
       setSaving(false);
       if (error) { setErr(error.message); return; }
       nav(`/customers/${data.id}`, { replace: true });

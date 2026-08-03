@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase.js';
-import { useOrg } from '../../context/OrgContext.jsx';
-
 /**
  * Labor rates + shop burden settings.
  *
@@ -18,7 +16,6 @@ const emptyRate = () => ({
 });
 
 export default function LaborSettings() {
-  const { activeOrg } = useOrg();
   const [rates, setRates] = useState([]);
   const [dirty, setDirty] = useState(new Set());
   const [deleted, setDeleted] = useState(new Set());
@@ -31,8 +28,8 @@ export default function LaborSettings() {
   const load = async () => {
     setLoading(true);
     const [r, o] = await Promise.all([
-      supabase.from('labor_rates').select('*').eq('org_id', activeOrg.id).order('name'),
-      supabase.from('orgs').select('overhead_pct, fringe_pct, default_markup_pct').eq('id', activeOrg.id).maybeSingle(),
+      supabase.from('labor_rates').select('*').order('name'),
+      supabase.from('user_settings').select('overhead_pct, fringe_pct, default_markup_pct').maybeSingle(),
     ]);
     if (r.error) setErr(r.error.message);
     setRates(r.data || []);
@@ -42,9 +39,9 @@ export default function LaborSettings() {
   };
 
   useEffect(() => {
-    if (activeOrg?.id) load();
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeOrg?.id]);
+  }, []);
 
   const patch = (id, k, v) => {
     setRates((rs) => rs.map((r) => r.id === id ? { ...r, [k]: v } : r));
@@ -65,12 +62,12 @@ export default function LaborSettings() {
   const saveAll = async () => {
     setSaving(true); setErr(''); setMsg('');
 
-    // 1. org burden settings
-    const { error: oe } = await supabase.from('orgs').update({
+    // 1. shop burden settings — upsert so the first save creates the row.
+    const { error: oe } = await supabase.from('user_settings').upsert({
       overhead_pct:       Number(org.overhead_pct || 0),
       fringe_pct:         Number(org.fringe_pct || 0),
       default_markup_pct: Number(org.default_markup_pct || 0),
-    }).eq('id', activeOrg.id);
+    }, { onConflict: 'user_id' });
     if (oe) { setSaving(false); setErr(oe.message); return; }
 
     // 2. labor rates diff
@@ -84,7 +81,6 @@ export default function LaborSettings() {
     }
     if (toInsert.length) {
       const payload = toInsert.map((r) => ({
-        org_id: activeOrg.id,
         name: r.name,
         hourly_rate: Number(r.hourly_rate || 0),
         category: r.category || null,

@@ -1,30 +1,29 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase.js';
-import { useOrg } from '../context/OrgContext.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 
 /**
  * A skinny landing page — quick counts + recent projects so the estimator
- * can see the shape of the workspace the moment they sign in.
+ * can see the shape of the workspace the moment they sign in. RLS scopes
+ * every table to the authenticated user; no explicit filter needed here.
  */
 export default function Dashboard() {
-  const { activeOrg } = useOrg();
+  const { user } = useAuth();
   const [counts, setCounts] = useState({ customers: 0, projects: 0, estimates: 0, materials: 0 });
   const [recentProjects, setRecent] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!activeOrg?.id) return;
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const orgId = activeOrg.id;
       const [c, p, e, m, recent] = await Promise.all([
-        supabase.from('customers').select('id', { count: 'exact', head: true }).eq('org_id', orgId),
-        supabase.from('projects').select('id',  { count: 'exact', head: true }).eq('org_id', orgId),
-        supabase.from('estimates').select('id', { count: 'exact', head: true }).eq('org_id', orgId),
-        supabase.from('materials').select('id', { count: 'exact', head: true }).eq('org_id', orgId),
-        supabase.from('projects').select('id, name, status, updated_at, customer:customer_id(name)').eq('org_id', orgId).order('updated_at', { ascending: false }).limit(6),
+        supabase.from('customers').select('id', { count: 'exact', head: true }),
+        supabase.from('projects').select('id',   { count: 'exact', head: true }),
+        supabase.from('estimates').select('id',  { count: 'exact', head: true }),
+        supabase.from('materials').select('id',  { count: 'exact', head: true }),
+        supabase.from('projects').select('id, name, status, updated_at, customer:customer_id(name)').order('updated_at', { ascending: false }).limit(6),
       ]);
       if (cancelled) return;
       setCounts({
@@ -37,14 +36,14 @@ export default function Dashboard() {
       setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [activeOrg?.id]);
+  }, []);
 
   return (
     <>
       <div className="page-head">
         <div className="page-head-title">
           <h1>Dashboard</h1>
-          <p>{activeOrg ? activeOrg.name : 'No workspace selected'}</p>
+          <p>{user?.email ? `Signed in as ${user.email}` : ''}</p>
         </div>
         <div className="page-head-actions">
           <Link className="btn primary" to="/estimates/new">+ New estimate</Link>

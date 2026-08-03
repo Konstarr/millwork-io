@@ -17,7 +17,7 @@ export default function Signup() {
     setBusy(false);
     if (error) { setErr(error.message); return; }
     // If email confirmations are off, session is returned immediately.
-    if (data.session) nav('/onboarding', { replace: true });
+    if (data.session) nav('/', { replace: true });
     else setMsg('Check your inbox to confirm your email, then come back and sign in.');
   };
 

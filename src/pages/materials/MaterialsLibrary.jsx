@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase.js';
-import { useOrg } from '../../context/OrgContext.jsx';
-
 /**
  * Materials Library — millwork.io
  *
@@ -37,7 +35,6 @@ const emptyRow = () => ({
 const PAGE_SIZE = 100;
 
 export default function MaterialsLibrary() {
-  const { activeOrg } = useOrg();
   const [rows, setRows]         = useState([]);
   const [dirty, setDirty]       = useState(new Set());
   const [deleted, setDeleted]   = useState(new Set());
@@ -57,7 +54,6 @@ export default function MaterialsLibrary() {
     const { data, error } = await supabase
       .from('materials')
       .select('*')
-      .eq('org_id', activeOrg.id)
       .order('category', { ascending: true })
       .order('name',     { ascending: true })
       .limit(20000);
@@ -68,9 +64,9 @@ export default function MaterialsLibrary() {
   };
 
   useEffect(() => {
-    if (activeOrg?.id) load();
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeOrg?.id]);
+  }, []);
 
   // Reset to page 1 whenever a filter changes so the user isn't stranded on
   // page 42 of a filtered set that only has 3 pages.
@@ -129,9 +125,8 @@ export default function MaterialsLibrary() {
   };
 
   const importStarter = async () => {
-    if (!activeOrg?.id) return;
     setImp(true); setErr(''); setMsg('');
-    const { data, error } = await supabase.rpc('import_starter_materials', { org_in: activeOrg.id });
+    const { data, error } = await supabase.rpc('import_starter_materials');
     setImp(false);
     if (error) { setErr(error.message); return; }
     setMsg(`Imported ${data ?? 0} materials from the starter library.`);
@@ -150,7 +145,6 @@ export default function MaterialsLibrary() {
     }
     if (toInsert.length) {
       const payload = toInsert.map((r) => ({
-        org_id: activeOrg.id,
         name: r.name,
         item_number:  r.item_number  || null,
         manufacturer: r.manufacturer || null,

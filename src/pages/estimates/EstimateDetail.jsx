@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
-import { useOrg } from '../../context/OrgContext.jsx';
-
 /**
  * Estimate editor.
  *
@@ -34,7 +32,6 @@ const emptyLine = () => ({
 export default function EstimateDetail() {
   const { id }         = useParams();
   const isNew          = id === 'new';
-  const { activeOrg }  = useOrg();
   const nav            = useNavigate();
   const [params]       = useSearchParams();
 
@@ -56,13 +53,12 @@ export default function EstimateDetail() {
   const [msg, setMsg]               = useState('');
 
   useEffect(() => {
-    if (!activeOrg?.id) return;
     let cancelled = false;
     (async () => {
       const [pr, mt, lr] = await Promise.all([
-        supabase.from('projects').select('id, name, customer:customer_id(name)').eq('org_id', activeOrg.id).order('name'),
-        supabase.from('materials').select('id, sku, name, unit, unit_cost, waste_pct').eq('org_id', activeOrg.id).order('name'),
-        supabase.from('labor_rates').select('id, name, hourly_rate').eq('org_id', activeOrg.id).order('name'),
+        supabase.from('projects').select('id, name, customer:customer_id(name)').order('name'),
+        supabase.from('materials').select('id, sku, name, unit, unit_cost, waste_pct').order('name'),
+        supabase.from('labor_rates').select('id, name, hourly_rate').order('name'),
       ]);
       if (cancelled) return;
       setProjects(pr.data || []);
@@ -82,7 +78,7 @@ export default function EstimateDetail() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, isNew, activeOrg?.id]);
+  }, [id, isNew]);
 
   const setH = (k, v) => setHeader((h) => ({ ...h, [k]: v }));
 
@@ -136,7 +132,6 @@ export default function EstimateDetail() {
     // 1. upsert header
     const headerPayload = {
       ...header,
-      org_id: activeOrg.id,
       project_id: header.project_id || null,
       total_amount: totals.total,
     };
@@ -155,7 +150,6 @@ export default function EstimateDetail() {
     if (lines.length > 0) {
       const payload = lines.map((l, i) => ({
         estimate_id: estimateId,
-        org_id: activeOrg.id,
         kind: l.kind,
         description: l.description || '',
         material_id: l.material_id || null,

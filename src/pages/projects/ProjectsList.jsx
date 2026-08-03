@@ -1,12 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
-import { useOrg } from '../../context/OrgContext.jsx';
-
 const STATUSES = ['draft', 'bidding', 'awarded', 'in-progress', 'complete', 'lost'];
 
 export default function ProjectsList() {
-  const { activeOrg } = useOrg();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState('');
@@ -14,19 +11,17 @@ export default function ProjectsList() {
   const nav = useNavigate();
 
   useEffect(() => {
-    if (!activeOrg?.id) return;
     let cancelled = false;
     (async () => {
       setLoading(true);
       const { data } = await supabase
         .from('projects')
         .select('id, name, status, bid_due, updated_at, customer:customer_id(id, name)')
-        .eq('org_id', activeOrg.id)
         .order('updated_at', { ascending: false });
       if (!cancelled) { setRows(data || []); setLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [activeOrg?.id]);
+  }, []);
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
