@@ -44,9 +44,9 @@ the `SUPABASE_PROJECT_ID` secret.
 To apply migrations locally instead: `supabase link --project-ref <REF> && supabase db push`.
 
 **First run** applies `20260731170000_reset_public_schema.sql`, which drops
-every table + function in `public.*`. This is intentional — the project used
-to host grainhub. Auth users survive; they just have to go through
-`/onboarding` to create a workspace.
+every table + function in `public.*`. This is intentional — the Supabase
+project used to host a previous app. Auth users survive; they just have to
+go through `/onboarding` to create a workspace.
 
 ## Layout
 

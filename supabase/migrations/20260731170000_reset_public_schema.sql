@@ -1,7 +1,7 @@
 -- Reset the public schema before installing millwork.io.
 --
--- This exists because we are re-using the Supabase project that previously
--- hosted grainhub (suppliers/forums/wiki/news/events/etc.). Rather than list
+-- This exists because we are re-using a Supabase project that previously
+-- hosted a different app (suppliers/forums/wiki/news/events/etc.). Rather than list
 -- every legacy object, we drop every table + routine that lives in the public
 -- schema. Supabase-managed schemas (auth, storage, realtime, etc.) are left
 -- alone, so existing auth.users still exist — they will simply have no
