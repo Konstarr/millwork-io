@@ -17,7 +17,7 @@ const CATEGORY_SUGGESTIONS = ['Cabinets', 'Die Walls', 'Paneling', 'Trim', 'Coun
 
 export default function ProductDetail() {
   const { id } = useParams();
-  const isNew  = id === 'new';
+  const isNew  = !id || id === 'new';
   const nav    = useNavigate();
 
   const [form, setForm] = useState({ name: '', category: '', unit: 'LF', description: '', notes: '' });

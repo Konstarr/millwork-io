@@ -35,20 +35,20 @@ export default function App() {
         <Route element={<RequireAuth><AppShell /></RequireAuth>}>
           <Route path="/"                 element={<Dashboard />} />
 
+          {/* NOTE: no separate "/x/new" routes. React Router ranks static
+              segments above params, so "/projects/new" would match its own
+              route and useParams().id would be undefined instead of "new" —
+              which broke every create form. The :id routes handle "new". */}
           <Route path="/customers"        element={<CustomersList />} />
-          <Route path="/customers/new"    element={<CustomerDetail />} />
           <Route path="/customers/:id"    element={<CustomerDetail />} />
 
           <Route path="/projects"         element={<ProjectsList />} />
-          <Route path="/projects/new"     element={<ProjectDetail />} />
           <Route path="/projects/:id"     element={<ProjectDetail />} />
 
           <Route path="/estimates"        element={<EstimatesList />} />
-          <Route path="/estimates/new"    element={<EstimateDetail />} />
           <Route path="/estimates/:id"    element={<EstimateDetail />} />
 
           <Route path="/products"         element={<ProductsList />} />
-          <Route path="/products/new"     element={<ProductDetail />} />
           <Route path="/products/:id"     element={<ProductDetail />} />
 
           <Route path="/materials"        element={<MaterialsLibrary />} />

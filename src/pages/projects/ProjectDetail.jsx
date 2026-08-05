@@ -17,7 +17,7 @@ const STATUSES = ['draft', 'bidding', 'awarded', 'in-progress', 'complete', 'los
 
 export default function ProjectDetail() {
   const { id }        = useParams();
-  const isNew         = id === 'new';
+  const isNew         = !id || id === 'new';
   const nav           = useNavigate();
 
   const [form, setForm]         = useState(EMPTY);

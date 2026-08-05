@@ -9,7 +9,7 @@ const EMPTY = {
 
 export default function CustomerDetail() {
   const { id }         = useParams();
-  const isNew          = id === 'new';
+  const isNew          = !id || id === 'new';
   const nav            = useNavigate();
   const [form, setForm]= useState(EMPTY);
   const [loading, setLoading] = useState(!isNew);
