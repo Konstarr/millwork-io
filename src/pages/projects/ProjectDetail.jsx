@@ -299,6 +299,9 @@ function DrawingsPanel({ projectId }) {
                   <td className="right muted">{fmtSize(f.size_bytes)}</td>
                   <td className="right muted">{new Date(f.created_at).toLocaleDateString()}</td>
                   <td className="right">
+                    {(f.mime_type === 'application/pdf' || (f.mime_type || '').startsWith('image/')) && (
+                      <><Link to={`/takeoff/${f.id}`} className="btn sm primary">Takeoff →</Link>{' '}</>
+                    )}
                     <button className="btn sm ghost" onClick={() => open(f)}>Open ↗</button>{' '}
                     <button className="btn sm ghost" onClick={() => remove(f)}>×</button>
                   </td>

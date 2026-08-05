@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext.jsx';
 import RequireAuth from './components/auth/RequireAuth.jsx';
@@ -21,6 +22,8 @@ import LaborSettings    from './pages/labor/LaborSettings.jsx';
 
 import ProductsList  from './pages/products/ProductsList.jsx';
 import ProductDetail from './pages/products/ProductDetail.jsx';
+// Lazy: pdf.js is ~800 kB — only load it when a takeoff screen opens.
+const TakeoffView = lazy(() => import('./pages/takeoff/TakeoffView.jsx'));
 
 export default function App() {
   return (
@@ -50,6 +53,15 @@ export default function App() {
 
           <Route path="/materials"        element={<MaterialsLibrary />} />
           <Route path="/labor"            element={<LaborSettings />} />
+
+          <Route
+            path="/takeoff/:fileId"
+            element={
+              <Suspense fallback={<div style={{ padding: 32 }} className="muted">Loading takeoff…</div>}>
+                <TakeoffView />
+              </Suspense>
+            }
+          />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />
