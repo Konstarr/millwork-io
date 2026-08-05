@@ -1,17 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
+import { computeProductCost } from '../../lib/productCost.js';
+
 /**
  * Estimate editor.
  *
  * An estimate = header (project, name, status, markup %, tax %) + N lines.
- * Each line is either:
+ * Each line is one of:
+ *   - kind='product'  → an assembly from the Products library; unit_cost is
+ *                       a SNAPSHOT of the product's material+labor rollup at
+ *                       the moment it was dropped in
  *   - kind='material' → pulls unit_cost from materials library (or overridden)
  *   - kind='labor'    → pulls hourly_rate from labor_rates (or overridden)
  *   - kind='other'    → freeform (subs, freight, misc)
  *
- * Totals are computed client-side on save so the estimator sees them live;
- * a server-side trigger recomputes total_amount as the source of truth.
+ * Totals are computed client-side so the estimator sees them live.
  */
 const STATUSES = ['draft', 'sent', 'accepted', 'rejected'];
 
@@ -22,8 +26,9 @@ const emptyLine = () => ({
   description: '',
   material_id: null,
   labor_rate_id: null,
+  product_id: null,
   quantity: 1,
-  unit: 'ea',
+  unit: 'EA',
   unit_cost: 0,
   waste_pct: 0,
   sort_order: 0,
@@ -47,6 +52,7 @@ export default function EstimateDetail() {
   const [projects, setProjects]     = useState([]);
   const [materials, setMaterials]   = useState([]);
   const [laborRates, setLaborRates] = useState([]);
+  const [products, setProducts]     = useState([]);
   const [loading, setLoading]       = useState(!isNew);
   const [saving, setSaving]         = useState(false);
   const [err, setErr]               = useState('');
@@ -55,15 +61,23 @@ export default function EstimateDetail() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [pr, mt, lr] = await Promise.all([
+      const [pr, mt, lr, pd] = await Promise.all([
         supabase.from('projects').select('id, name, customer:customer_id(name)').order('name'),
-        supabase.from('materials').select('id, sku, name, unit, unit_cost, waste_pct').order('name'),
+        // Cap the dropdown at 500 — with a 9k-row library the full list is
+        // unusable in a <select> anyway; product assemblies are the main path.
+        supabase.from('materials').select('id, item_number, name, description, manufacturer, unit, unit_cost, waste_pct').order('name').limit(500),
         supabase.from('labor_rates').select('id, name, hourly_rate').order('name'),
+        supabase.from('products').select(`
+          id, name, category, unit,
+          product_materials ( qty_per_unit, waste_pct, material:material_id ( unit_cost, waste_pct ) ),
+          product_labor     ( hours_per_unit, rate:labor_rate_id ( hourly_rate ) )
+        `).order('name'),
       ]);
       if (cancelled) return;
       setProjects(pr.data || []);
       setMaterials(mt.data || []);
       setLaborRates(lr.data || []);
+      setProducts(pd.data || []);
 
       if (isNew) { setLoading(false); return; }
       const [est, ls] = await Promise.all([
@@ -88,14 +102,14 @@ export default function EstimateDetail() {
   const removeLine = (lineId) => setLines((ls) => ls.filter((l) => l.id !== lineId));
   const patchLine  = (lineId, patch) => setLines((ls) => ls.map((l) => l.id === lineId ? { ...l, ...patch } : l));
 
-  // When admin picks a material, autofill description/unit/cost/waste.
+  // When the estimator picks a material, autofill description/unit/cost/waste.
   const onPickMaterial = (lineId, materialId) => {
     const m = materials.find((x) => x.id === materialId);
     if (!m) { patchLine(lineId, { material_id: null }); return; }
     patchLine(lineId, {
       material_id: m.id,
-      description: m.name + (m.sku ? ` (${m.sku})` : ''),
-      unit: m.unit || 'ea',
+      description: (m.description || m.name) + (m.item_number ? ` (${m.item_number})` : ''),
+      unit: m.unit || 'EA',
       unit_cost: Number(m.unit_cost || 0),
       waste_pct: Number(m.waste_pct || 0),
     });
@@ -108,6 +122,19 @@ export default function EstimateDetail() {
       description: r.name,
       unit: 'hr',
       unit_cost: Number(r.hourly_rate || 0),
+      waste_pct: 0,
+    });
+  };
+  // Product drop: one line, cost snapshotted from the current rollup.
+  const onPickProduct = (lineId, productId) => {
+    const p = products.find((x) => x.id === productId);
+    if (!p) { patchLine(lineId, { product_id: null }); return; }
+    const c = computeProductCost(p);
+    patchLine(lineId, {
+      product_id: p.id,
+      description: p.name + (p.category ? ` (${p.category})` : ''),
+      unit: p.unit || 'EA',
+      unit_cost: Number(c.total.toFixed(4)),
       waste_pct: 0,
     });
   };
@@ -154,8 +181,9 @@ export default function EstimateDetail() {
         description: l.description || '',
         material_id: l.material_id || null,
         labor_rate_id: l.labor_rate_id || null,
+        product_id: l.product_id || null,
         quantity: Number(l.quantity || 0),
-        unit: l.unit || 'ea',
+        unit: l.unit || 'EA',
         unit_cost: Number(l.unit_cost || 0),
         waste_pct: Number(l.waste_pct || 0),
         sort_order: i,
@@ -227,6 +255,7 @@ export default function EstimateDetail() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <h2 style={{ margin: 0 }}>Line items</h2>
           <div style={{ display: 'flex', gap: 6 }}>
+            <button type="button" className="btn sm primary" onClick={() => addLine('product')}>+ Product</button>
             <button type="button" className="btn sm" onClick={() => addLine('material')}>+ Material</button>
             <button type="button" className="btn sm" onClick={() => addLine('labor')}>+ Labor</button>
             <button type="button" className="btn sm" onClick={() => addLine('other')}>+ Other</button>
@@ -256,17 +285,27 @@ export default function EstimateDetail() {
                   return (
                     <tr key={l.id}>
                       <td>
-                        <select value={l.kind} onChange={(e) => patchLine(l.id, { kind: e.target.value, material_id: null, labor_rate_id: null })} style={{ width: '100%' }}>
+                        <select value={l.kind} onChange={(e) => patchLine(l.id, { kind: e.target.value, material_id: null, labor_rate_id: null, product_id: null })} style={{ width: '100%' }}>
+                          <option value="product">Product</option>
                           <option value="material">Material</option>
                           <option value="labor">Labor</option>
                           <option value="other">Other</option>
                         </select>
                       </td>
                       <td>
-                        {l.kind === 'material' ? (
+                        {l.kind === 'product' ? (
+                          <select value={l.product_id || ''} onChange={(e) => onPickProduct(l.id, e.target.value)} style={{ width: '100%' }}>
+                            <option value="">— pick a product —</option>
+                            {products.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.name}{p.category ? ` — ${p.category}` : ''} (per {p.unit})
+                              </option>
+                            ))}
+                          </select>
+                        ) : l.kind === 'material' ? (
                           <select value={l.material_id || ''} onChange={(e) => onPickMaterial(l.id, e.target.value)} style={{ width: '100%' }}>
                             <option value="">— custom —</option>
-                            {materials.map((m) => <option key={m.id} value={m.id}>{m.name}{m.sku ? ` (${m.sku})` : ''}</option>)}
+                            {materials.map((m) => <option key={m.id} value={m.id}>{m.description || m.name}{m.item_number ? ` (${m.item_number})` : ''}</option>)}
                           </select>
                         ) : l.kind === 'labor' ? (
                           <select value={l.labor_rate_id || ''} onChange={(e) => onPickLabor(l.id, e.target.value)} style={{ width: '100%' }}>

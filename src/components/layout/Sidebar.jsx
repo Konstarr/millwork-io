@@ -5,6 +5,7 @@ const NAV = [
   { to: '/customers',  label: 'Customers',   icon: '◎' }, // ◎
   { to: '/projects',   label: 'Projects',    icon: '▣' }, // ▣
   { to: '/estimates',  label: 'Estimating',  icon: '∑' }, // ∑
+  { to: '/products',   label: 'Products',    icon: '⬒' }, // ⬒
   { to: '/materials',  label: 'Materials',   icon: '▦' }, // ▦
   { to: '/labor',      label: 'Labor',       icon: '⚙' }, // ⚙
 ];

@@ -19,6 +19,9 @@ import EstimateDetail from './pages/estimates/EstimateDetail.jsx';
 import MaterialsLibrary from './pages/materials/MaterialsLibrary.jsx';
 import LaborSettings    from './pages/labor/LaborSettings.jsx';
 
+import ProductsList  from './pages/products/ProductsList.jsx';
+import ProductDetail from './pages/products/ProductDetail.jsx';
+
 export default function App() {
   return (
     <AuthProvider>
@@ -40,6 +43,10 @@ export default function App() {
           <Route path="/estimates"        element={<EstimatesList />} />
           <Route path="/estimates/new"    element={<EstimateDetail />} />
           <Route path="/estimates/:id"    element={<EstimateDetail />} />
+
+          <Route path="/products"         element={<ProductsList />} />
+          <Route path="/products/new"     element={<ProductDetail />} />
+          <Route path="/products/:id"     element={<ProductDetail />} />
 
           <Route path="/materials"        element={<MaterialsLibrary />} />
           <Route path="/labor"            element={<LaborSettings />} />

@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
+import { useAuth } from '../../context/AuthContext.jsx';
+
 const EMPTY = {
   name: '',
   customer_id: '',
@@ -135,6 +137,8 @@ export default function ProjectDetail() {
         </div>
       </form>
 
+      {!isNew && <DrawingsPanel projectId={id} />}
+
       {!isNew && (
         <div className="panel" style={{ marginTop: 20 }}>
           <h2 style={{ marginBottom: 10 }}>Estimates</h2>
@@ -167,5 +171,143 @@ export default function ProjectDetail() {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Architectural drawings attached to this project. Binary goes to the
+ * private 'drawings' storage bucket at <user_id>/<project_id>/<filename>;
+ * metadata lives in public.project_files. Open uses a 1-hour signed URL.
+ */
+function DrawingsPanel({ projectId }) {
+  const { user } = useAuth();
+  const fileRef = useRef(null);
+  const [files, setFiles]       = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr]           = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('project_files')
+      .select('id, name, storage_path, mime_type, size_bytes, created_at')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false });
+    if (error) setErr(error.message);
+    setFiles(data || []);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  const onPick = async (e) => {
+    const picked = Array.from(e.target.files || []);
+    if (!picked.length || !user?.id) return;
+    setUploading(true); setErr('');
+    for (const f of picked) {
+      // Sanitize the filename for the object key but preserve it for display.
+      const safe = f.name.replace(/[^A-Za-z0-9._-]+/g, '_');
+      const path = `${user.id}/${projectId}/${Date.now()}_${safe}`;
+      const up = await supabase.storage.from('drawings').upload(path, f, {
+        contentType: f.type || 'application/octet-stream',
+        upsert: false,
+      });
+      if (up.error) { setErr(`${f.name}: ${up.error.message}`); continue; }
+      const ins = await supabase.from('project_files').insert({
+        project_id: projectId,
+        name: f.name,
+        storage_path: path,
+        mime_type: f.type || null,
+        size_bytes: f.size,
+      });
+      if (ins.error) setErr(`${f.name}: ${ins.error.message}`);
+    }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = '';
+    await load();
+  };
+
+  const open = async (f) => {
+    const { data, error } = await supabase.storage
+      .from('drawings')
+      .createSignedUrl(f.storage_path, 3600);
+    if (error) { setErr(error.message); return; }
+    window.open(data.signedUrl, '_blank', 'noopener');
+  };
+
+  const remove = async (f) => {
+    if (!confirm(`Delete ${f.name}?`)) return;
+    await supabase.storage.from('drawings').remove([f.storage_path]);
+    const { error } = await supabase.from('project_files').delete().eq('id', f.id);
+    if (error) { setErr(error.message); return; }
+    await load();
+  };
+
+  const fmtSize = (b) => {
+    if (b == null) return '—';
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
+    return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  return (
+    <div className="panel" style={{ marginTop: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <h2 style={{ margin: 0 }}>Drawings</h2>
+        <div>
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.dwg,.dxf"
+            style={{ display: 'none' }}
+            onChange={onPick}
+          />
+          <button className="btn primary sm" onClick={() => fileRef.current?.click()} disabled={uploading}>
+            {uploading ? 'Uploading…' : '+ Upload drawings'}
+          </button>
+        </div>
+      </div>
+
+      {err && <div className="auth-err" style={{ marginBottom: 10 }}>{err}</div>}
+
+      {loading ? (
+        <div className="muted">Loading…</div>
+      ) : files.length === 0 ? (
+        <div className="empty">
+          No drawings yet. Upload the architectural set (PDF, images, DWG/DXF) to start takeoff.
+        </div>
+      ) : (
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th style={{ width: 90 }} className="right">Size</th>
+                <th style={{ width: 110 }} className="right">Uploaded</th>
+                <th style={{ width: 140 }} className="right"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {files.map((f) => (
+                <tr key={f.id}>
+                  <td style={{ fontWeight: 600 }}>{f.name}</td>
+                  <td className="right muted">{fmtSize(f.size_bytes)}</td>
+                  <td className="right muted">{new Date(f.created_at).toLocaleDateString()}</td>
+                  <td className="right">
+                    <button className="btn sm ghost" onClick={() => open(f)}>Open ↗</button>{' '}
+                    <button className="btn sm ghost" onClick={() => remove(f)}>×</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
