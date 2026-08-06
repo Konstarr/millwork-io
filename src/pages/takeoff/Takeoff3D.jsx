@@ -107,6 +107,113 @@ async function extractVectorSegments(pdfPage, region, ftPerUnit) {
   }).slice(0, 4000);
 }
 
+/**
+ * Raster fallback: detect walls from pixels when the sheet has no vector
+ * linework (scanned or flattened-by-compression PDFs, image uploads).
+ *
+ * Method: downsample the cropped plan, binarize dark ink, then sweep rows
+ * (and columns) merging consecutive dark runs into rectangles. Rectangles
+ * that are long, reasonably thick, and strongly elongated become wall
+ * centerline segments. Axis-aligned only — which covers most floor plans.
+ *
+ * `cropCanvas` is the same canvas used for the floor texture (region crop).
+ * Returned segments are in PDF-unit coordinates like the vector ones.
+ */
+function rasterDetectSegments(cropCanvas, region, ftPerUnit) {
+  if (!ftPerUnit) return [];
+
+  // Downsample for speed; keep enough resolution that a wall is >= 2 px.
+  const DET_W = 1600;
+  const ds = Math.min(1, DET_W / cropCanvas.width);
+  const w = Math.max(1, Math.round(cropCanvas.width * ds));
+  const h = Math.max(1, Math.round(cropCanvas.height * ds));
+  const det = document.createElement('canvas');
+  det.width = w; det.height = h;
+  const ctx = det.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(cropCanvas, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+
+  // Binary mask of "ink" pixels.
+  const dark = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+    if (r * 0.299 + g * 0.587 + b * 0.114 < 120) dark[i] = 1;
+  }
+
+  const unitsPerPx = (region.w / w);          // PDF units per detection px
+  const ftPerPx    = unitsPerPx * ftPerUnit;  // feet per detection px
+  const minLenPx   = Math.max(6, 2.5 / ftPerPx);          // walls >= 2.5 ft
+  const minThickPx = Math.max(2, Math.round(0.06 / ftPerPx)); // >= ~3/4"
+  const maxThickPx = Math.max(minThickPx + 1, 1.5 / ftPerPx); // <= 1.5 ft
+
+  const segs = [];
+
+  // Generic sweep. horizontal=true scans rows for x-runs; else columns.
+  const sweep = (horizontal) => {
+    const outer = horizontal ? h : w;
+    const inner = horizontal ? w : h;
+    const at = (o, i2) => horizontal ? dark[o * w + i2] : dark[i2 * w + o];
+    let active = [];   // { lo, hi, first, last }
+
+    const finalize = (r) => {
+      const thick = r.last - r.first + 1;
+      const len = r.hi - r.lo + 1;
+      if (len < minLenPx || thick < minThickPx || thick > maxThickPx) return;
+      if (len < thick * 3) return;   // must be elongated, not a blob
+      const c = (r.first + r.last) / 2;
+      const toUnit = (X, Y) => [region.x + X * unitsPerPx, region.y + Y * (region.h / h)];
+      segs.push(horizontal
+        ? [toUnit(r.lo, c), toUnit(r.hi, c)]
+        : [toUnit(c, r.lo), toUnit(c, r.hi)]);
+    };
+
+    for (let o = 0; o < outer; o++) {
+      // collect dark runs on this line
+      const runs = [];
+      let s = -1;
+      for (let i2 = 0; i2 <= inner; i2++) {
+        const d = i2 < inner ? at(o, i2) : 0;
+        if (d && s < 0) s = i2;
+        else if (!d && s >= 0) { if (i2 - s >= 3) runs.push([s, i2 - 1]); s = -1; }
+      }
+      // merge with active rectangles
+      const next = [];
+      for (const [lo, hi] of runs) {
+        const runLen = hi - lo + 1;
+        let matched = null;
+        for (let a = 0; a < active.length; a++) {
+          const r = active[a];
+          if (r.last !== o - 1) continue;
+          if (lo > r.hi + 2 || hi < r.lo - 2) continue;
+          // Size compatibility: without this, connected wall networks (every
+          // floor plan) chain around corners into one giant rejected blob.
+          const rectLen = r.hi - r.lo + 1;
+          if (runLen > rectLen * 1.6 + 4 || runLen < rectLen * 0.6 - 4) continue;
+          matched = r; active.splice(a, 1); break;
+        }
+        if (matched) {
+          matched.lo = Math.min(matched.lo, lo);
+          matched.hi = Math.max(matched.hi, hi);
+          matched.last = o;
+          next.push(matched);
+        } else {
+          next.push({ lo, hi, first: o, last: o });
+        }
+      }
+      for (const r of active) finalize(r);   // rectangles that ended
+      active = next;
+      if (segs.length > 3000) break;
+    }
+    for (const r of active) finalize(r);
+  };
+
+  sweep(true);
+  sweep(false);
+  return segs.slice(0, 3000);
+}
+
 export default function Takeoff3D() {
   const { fileId } = useParams();
   const [params]   = useSearchParams();
@@ -126,6 +233,7 @@ export default function Takeoff3D() {
   const [wallH, setWallH]       = useState(9);
   const [wallOpacity, setWallOpacity] = useState(0.35);
   const [showAuto, setShowAuto] = useState(true);
+  const [autoMethod, setAutoMethod] = useState('none'); // 'vector' | 'raster' | 'none'
   const [status, setStatus]     = useState('Loading drawing…');
   const [err, setErr]           = useState('');
 
@@ -174,8 +282,13 @@ export default function Takeoff3D() {
         if (cancelled) return;
         setRegion(reg);
         setTexture(new THREE.CanvasTexture(c));
-        setAutoSegs([]);           // no vectors in a raster image
-        setStatus('');
+        // Images have no vectors — detect walls straight from the pixels.
+        setStatus('Detecting walls from pixels…');
+        try {
+          const segs = rasterDetectSegments(c, reg, ftPerUnit);
+          if (!cancelled) { setAutoSegs(segs); setAutoMethod(segs.length ? 'raster' : 'none'); }
+        } catch { if (!cancelled) { setAutoSegs([]); setAutoMethod('none'); } }
+        if (!cancelled) setStatus('');
         return;
       }
 
@@ -198,11 +311,27 @@ export default function Takeoff3D() {
       setTexture(new THREE.CanvasTexture(crop));
 
       setStatus('Detecting walls…');
+      let segs = [];
+      let method = 'none';
       try {
-        const segs = await extractVectorSegments(pdfPage, reg, ftPerUnit);
-        if (!cancelled) setAutoSegs(segs);
-      } catch { if (!cancelled) setAutoSegs([]); }
-      if (!cancelled) setStatus('');
+        segs = await extractVectorSegments(pdfPage, reg, ftPerUnit);
+        if (segs.length >= 20) method = 'vector';
+      } catch { segs = []; }
+      // Flattened/scanned PDFs have few or no vector paths — fall back to
+      // pixel detection on the same canvas we cropped for the floor texture.
+      if (segs.length < 20) {
+        if (!cancelled) setStatus('No vector linework — detecting walls from pixels…');
+        try {
+          const rSegs = rasterDetectSegments(crop, reg, ftPerUnit);
+          if (rSegs.length > segs.length) { segs = rSegs; method = 'raster'; }
+          else if (segs.length) method = 'vector';
+        } catch { /* keep vector result */ }
+      }
+      if (!cancelled) {
+        setAutoSegs(segs);
+        setAutoMethod(segs.length ? method : 'none');
+        setStatus('');
+      }
     })();
     return () => { cancelled = true; };
   }, [fileId, page]);
@@ -415,12 +544,15 @@ export default function Takeoff3D() {
           </label>
           <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <input type="checkbox" checked={showAuto} onChange={(e) => setShowAuto(e.target.checked)} />
-            Auto-detected walls <span className="muted">({autoSegs.length})</span>
+            Auto walls <span className="muted">
+              ({autoSegs.length}{autoMethod === 'raster' ? ' · pixel scan' : autoMethod === 'vector' ? ' · vector' : ''})
+            </span>
           </label>
           <div className="muted" style={{ fontSize: 11.5 }}>
             Drag to orbit · right-drag to pan · scroll to zoom.
-            Auto walls come from the PDF's vector lines (beta) — trace Wall
-            lines in 2D for clean geometry.
+            {autoMethod === 'raster'
+              ? ' Walls were detected from pixels (sheet has no vector linework) — expect some noise; trace Wall lines in 2D for clean geometry.'
+              : ' Auto walls are beta — trace Wall lines in 2D for clean geometry.'}
           </div>
 
           {legend.length > 0 && (
