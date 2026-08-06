@@ -119,11 +119,13 @@ async function extractVectorSegments(pdfPage, region, ftPerUnit) {
  * `cropCanvas` is the same canvas used for the floor texture (region crop).
  * Returned segments are in PDF-unit coordinates like the vector ones.
  */
-function rasterDetectSegments(cropCanvas, region, ftPerUnit) {
+function rasterDetectSegments(cropCanvas, region, ftPerUnit, opts = {}) {
   if (!ftPerUnit) return [];
+  const threshold = opts.threshold ?? 130;   // ink darkness cutoff (0-255 luma)
+  const minLenFt  = opts.minLenFt  ?? 2.5;   // shortest wall worth keeping
 
-  // Downsample for speed; keep enough resolution that a wall is >= 2 px.
-  const DET_W = 1600;
+  // Downsample for speed; high enough that a 4-6" wall stays >= 2 px.
+  const DET_W = 2200;
   const ds = Math.min(1, DET_W / cropCanvas.width);
   const w = Math.max(1, Math.round(cropCanvas.width * ds));
   const h = Math.max(1, Math.round(cropCanvas.height * ds));
@@ -139,14 +141,15 @@ function rasterDetectSegments(cropCanvas, region, ftPerUnit) {
   const dark = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) {
     const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
-    if (r * 0.299 + g * 0.587 + b * 0.114 < 120) dark[i] = 1;
+    if (r * 0.299 + g * 0.587 + b * 0.114 < threshold) dark[i] = 1;
   }
 
   const unitsPerPx = (region.w / w);          // PDF units per detection px
   const ftPerPx    = unitsPerPx * ftPerUnit;  // feet per detection px
-  const minLenPx   = Math.max(6, 2.5 / ftPerPx);          // walls >= 2.5 ft
-  const minThickPx = Math.max(2, Math.round(0.06 / ftPerPx)); // >= ~3/4"
+  const minLenPx   = Math.max(6, minLenFt / ftPerPx);
+  const minThickPx = Math.max(2, Math.round(0.05 / ftPerPx)); // >= ~5/8"
   const maxThickPx = Math.max(minThickPx + 1, 1.5 / ftPerPx); // <= 1.5 ft
+  const GAP = 2; // bridge tiny run breaks (anti-aliasing, tags) but not doors
 
   const segs = [];
 
@@ -170,13 +173,22 @@ function rasterDetectSegments(cropCanvas, region, ftPerUnit) {
     };
 
     for (let o = 0; o < outer; o++) {
-      // collect dark runs on this line
+      // collect dark runs on this line, bridging gaps <= GAP px
       const runs = [];
-      let s = -1;
+      let s = -1, gap = 0;
       for (let i2 = 0; i2 <= inner; i2++) {
         const d = i2 < inner ? at(o, i2) : 0;
-        if (d && s < 0) s = i2;
-        else if (!d && s >= 0) { if (i2 - s >= 3) runs.push([s, i2 - 1]); s = -1; }
+        if (d) {
+          if (s < 0) s = i2;
+          gap = 0;
+        } else if (s >= 0) {
+          gap++;
+          if (gap > GAP || i2 >= inner) {
+            const end = i2 - gap;
+            if (end - s + 1 >= 3) runs.push([s, end]);
+            s = -1; gap = 0;
+          }
+        }
       }
       // merge with active rectangles
       const next = [];
@@ -234,6 +246,14 @@ export default function Takeoff3D() {
   const [wallOpacity, setWallOpacity] = useState(0.35);
   const [showAuto, setShowAuto] = useState(true);
   const [autoMethod, setAutoMethod] = useState('none'); // 'vector' | 'raster' | 'none'
+  const [sensitivity, setSensitivity] = useState('med'); // pixel-scan tuning
+  const cropRef = useRef(null); // plan crop canvas, kept for re-detection
+
+  const SENS = {
+    low:  { threshold: 105, minLenFt: 3.5 },
+    med:  { threshold: 130, minLenFt: 2.5 },
+    high: { threshold: 168, minLenFt: 1.8 },
+  };
   const [status, setStatus]     = useState('Loading drawing…');
   const [err, setErr]           = useState('');
 
@@ -282,10 +302,11 @@ export default function Takeoff3D() {
         if (cancelled) return;
         setRegion(reg);
         setTexture(new THREE.CanvasTexture(c));
+        cropRef.current = c;
         // Images have no vectors — detect walls straight from the pixels.
         setStatus('Detecting walls from pixels…');
         try {
-          const segs = rasterDetectSegments(c, reg, ftPerUnit);
+          const segs = rasterDetectSegments(c, reg, ftPerUnit, SENS.med);
           if (!cancelled) { setAutoSegs(segs); setAutoMethod(segs.length ? 'raster' : 'none'); }
         } catch { if (!cancelled) { setAutoSegs([]); setAutoMethod('none'); } }
         if (!cancelled) setStatus('');
@@ -309,6 +330,7 @@ export default function Takeoff3D() {
       if (cancelled) return;
       setRegion(reg);
       setTexture(new THREE.CanvasTexture(crop));
+      cropRef.current = crop;
 
       setStatus('Detecting walls…');
       let segs = [];
@@ -322,7 +344,7 @@ export default function Takeoff3D() {
       if (segs.length < 20) {
         if (!cancelled) setStatus('No vector linework — detecting walls from pixels…');
         try {
-          const rSegs = rasterDetectSegments(crop, reg, ftPerUnit);
+          const rSegs = rasterDetectSegments(crop, reg, ftPerUnit, SENS.med);
           if (rSegs.length > segs.length) { segs = rSegs; method = 'raster'; }
           else if (segs.length) method = 'vector';
         } catch { /* keep vector result */ }
@@ -488,6 +510,15 @@ export default function Takeoff3D() {
     }
   }, [items, autoSegs, showAuto, wallH, wallOpacity, region, ft, texture]);
 
+  // Re-run pixel detection when sensitivity changes (raster mode only).
+  useEffect(() => {
+    if (autoMethod !== 'raster' || !cropRef.current || !region || !ft) return;
+    try {
+      setAutoSegs(rasterDetectSegments(cropRef.current, region, ft, SENS[sensitivity]));
+    } catch { /* keep current segments */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sensitivity]);
+
   // persist wall height (debounced-ish, on commit)
   const saveWallH = async (v) => {
     setWallH(v);
@@ -548,6 +579,16 @@ export default function Takeoff3D() {
               ({autoSegs.length}{autoMethod === 'raster' ? ' · pixel scan' : autoMethod === 'vector' ? ' · vector' : ''})
             </span>
           </label>
+          {autoMethod === 'raster' && (
+            <label style={{ display: 'grid', gap: 3 }}>
+              Detection sensitivity
+              <select className="org-switcher" value={sensitivity} onChange={(e) => setSensitivity(e.target.value)}>
+                <option value="low">Low — only bold walls, least noise</option>
+                <option value="med">Medium — balanced</option>
+                <option value="high">High — catch faint walls, more noise</option>
+              </select>
+            </label>
+          )}
           <div className="muted" style={{ fontSize: 11.5 }}>
             Drag to orbit · right-drag to pan · scroll to zoom.
             {autoMethod === 'raster'
