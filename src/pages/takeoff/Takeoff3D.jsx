@@ -247,7 +247,10 @@ export default function Takeoff3D() {
   const [showAuto, setShowAuto] = useState(true);
   const [autoMethod, setAutoMethod] = useState('none'); // 'vector' | 'raster' | 'none'
   const [sensitivity, setSensitivity] = useState('med'); // pixel-scan tuning
+  const [pickMode, setPickMode] = useState(false);       // click walls in 3D
   const cropRef = useRef(null); // plan crop canvas, kept for re-detection
+  const pickRef = useRef(false);
+  useEffect(() => { pickRef.current = pickMode; }, [pickMode]);
 
   const SENS = {
     low:  { threshold: 105, minLenFt: 3.5 },
@@ -415,9 +418,34 @@ export default function Takeoff3D() {
     };
     window.addEventListener('resize', onResize);
 
+    // Wall picking: a click (not a drag) raycasts into the wall groups and
+    // reports the hit via a DOM event so React state stays fresh.
+    let downPos = null;
+    const onDown = (e) => { downPos = [e.clientX, e.clientY]; };
+    const onUp = (e) => {
+      if (!pickRef.current || !downPos) return;
+      const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]);
+      downPos = null;
+      if (moved > 5) return;    // that was an orbit drag
+      const rect = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      const hits = ray.intersectObjects([...autoGroup.children, ...wallGroup.children], false);
+      const hit = hits.find((x) => x.object.userData?.kind);
+      if (hit) window.dispatchEvent(new CustomEvent('takeoff3d-pick', { detail: hit.object.userData }));
+    };
+    renderer.domElement.addEventListener('pointerdown', onDown);
+    renderer.domElement.addEventListener('pointerup', onUp);
+
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
+      renderer.domElement.removeEventListener('pointerdown', onDown);
+      renderer.domElement.removeEventListener('pointerup', onUp);
       controls.dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
@@ -441,7 +469,7 @@ export default function Takeoff3D() {
     };
     clear(w.wallGroup); clear(w.autoGroup); clear(w.prodGroup);
 
-    const wallSeg = (group, aU, bU, { height, thick, color, opacity }) => {
+    const wallSeg = (group, aU, bU, { height, thick, color, opacity }, userData) => {
       const a = toFt(aU), b = toFt(bU);
       const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
       if (len < 0.05) return;
@@ -450,25 +478,26 @@ export default function Takeoff3D() {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.position.set((a[0] + b[0]) / 2, height / 2, (a[1] + b[1]) / 2);
       mesh.rotation.y = -Math.atan2(b[1] - a[1], b[0] - a[0]);
+      if (userData) mesh.userData = userData;
       group.add(mesh);
     };
 
-    // traced walls
+    // traced/kept walls — solid green-gray, clickable to remove in pick mode
     for (const it of items.filter((x) => x.tool === 'wall')) {
       const pts = it.points || [];
       for (let i = 1; i < pts.length; i++) {
         wallSeg(w.wallGroup, pts[i - 1], pts[i], {
-          height: wallH, thick: 0.45, color: '#8D9B94', opacity: wallOpacity,
-        });
+          height: wallH, thick: 0.45, color: '#6F8F7F', opacity: Math.min(1, wallOpacity + 0.25),
+        }, { kind: 'wall', itemId: it.id });
       }
     }
 
-    // auto-detected vector walls
+    // auto-detected candidates — gray, clickable to KEEP in pick mode
     if (showAuto) {
-      for (const [a, b] of autoSegs) {
-        wallSeg(w.autoGroup, a, b, {
+      for (const seg of autoSegs) {
+        wallSeg(w.autoGroup, seg[0], seg[1], {
           height: wallH, thick: 0.25, color: '#5C6B75', opacity: wallOpacity * 0.7,
-        });
+        }, { kind: 'auto', seg });
       }
     }
 
@@ -509,6 +538,41 @@ export default function Takeoff3D() {
       }
     }
   }, [items, autoSegs, showAuto, wallH, wallOpacity, region, ft, texture]);
+
+  // Handle 3D wall picks: keep an auto candidate (saves as a real wall item)
+  // or remove a kept wall.
+  useEffect(() => {
+    const onPick = async (e) => {
+      const ud = e.detail;
+      if (!file || !ft) return;
+      if (ud.kind === 'auto' && ud.seg) {
+        const [a, b] = ud.seg;
+        const qty = Math.hypot(b[0] - a[0], b[1] - a[1]) * ft;
+        const { data, error } = await supabase.from('takeoff_items').insert({
+          project_id: file.project_id,
+          file_id: fileId,
+          page,
+          tool: 'wall',
+          points: [a, b],
+          qty,
+        }).select('*').single();
+        if (error) { setErr(error.message); return; }
+        setItems((xs) => [...xs, data]);
+        setAutoSegs((segs) => segs.filter((s) => s !== ud.seg));
+      } else if (ud.kind === 'wall' && ud.itemId) {
+        setItems((xs) => xs.filter((x) => x.id !== ud.itemId));
+        await supabase.from('takeoff_items').delete().eq('id', ud.itemId);
+      }
+    };
+    window.addEventListener('takeoff3d-pick', onPick);
+    return () => window.removeEventListener('takeoff3d-pick', onPick);
+  }, [file, ft, fileId, page]);
+
+  // Cursor feedback for pick mode.
+  useEffect(() => {
+    const el = worldRef.current?.renderer?.domElement;
+    if (el) el.style.cursor = pickMode ? 'crosshair' : '';
+  }, [pickMode, texture]);
 
   // Re-run pixel detection when sensitivity changes (raster mode only).
   useEffect(() => {
@@ -588,6 +652,18 @@ export default function Takeoff3D() {
                 <option value="high">High — catch faint walls, more noise</option>
               </select>
             </label>
+          )}
+          <button
+            className={`btn sm ${pickMode ? 'primary' : 'ghost'}`}
+            onClick={() => setPickMode((v) => !v)}
+          >
+            {pickMode ? '✓ Picking walls — click them' : 'Pick walls'}
+          </button>
+          {pickMode && (
+            <div style={{ padding: '6px 8px', borderRadius: 6, background: '#FEF3D7', color: '#6B4B00', fontSize: 11.5 }}>
+              Click a <b>gray</b> auto wall to keep it (turns green and saves).
+              Click a <b>green</b> kept wall to remove it. Drag still orbits.
+            </div>
           )}
           <div className="muted" style={{ fontSize: 11.5 }}>
             Drag to orbit · right-drag to pan · scroll to zoom.

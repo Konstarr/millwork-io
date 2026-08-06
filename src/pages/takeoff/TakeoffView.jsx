@@ -33,6 +33,7 @@ const TOOLS = [
   { id: 'linear',    label: 'Linear',    hint: 'Click vertices; double-click or Enter to finish (LF products)' },
   { id: 'area',      label: 'Area',      hint: 'Click vertices; double-click to close (SF products)' },
   { id: 'wall',      label: 'Wall',      hint: 'Trace wall centerlines; double-click to finish. Powers the 3D view.' },
+  { id: 'pickwall',  label: 'Wall pick', hint: 'Click directly on a wall line — it auto-traces its full length' },
   { id: 'region',    label: 'Plan area', hint: 'Click two corners to designate the floor plan for 3D' },
 ];
 
@@ -70,6 +71,87 @@ function centroid(pts) {
   ];
 }
 
+/**
+ * Wall pick: given a click on the rendered drawing, find the dark line under
+ * the cursor and walk it to both ends (axis-aligned, gap-tolerant so wall
+ * tags and anti-aliasing don't stop the trace). Returns [[x1,y1],[x2,y2]]
+ * in canvas pixels, or null if there's no traceable line at the click.
+ */
+function autoTraceWall(canvas, clickPx, clickPy) {
+  const W = canvas.width, H = canvas.height;
+  // Read a window (full canvas if small) so huge sheets don't blow memory.
+  const MAX_AREA = 20e6;
+  let ox = 0, oy = 0, w = W, h = H;
+  if (W * H > MAX_AREA) {
+    w = Math.min(W, 3600); h = Math.min(H, 3600);
+    ox = Math.round(Math.min(Math.max(0, clickPx - w / 2), W - w));
+    oy = Math.round(Math.min(Math.max(0, clickPy - h / 2), H - h));
+  }
+  const data = canvas.getContext('2d', { willReadFrequently: true }).getImageData(ox, oy, w, h).data;
+  const dark = (x, y) => {
+    x = Math.round(x) - ox; y = Math.round(y) - oy;
+    if (x < 0 || y < 0 || x >= w || y >= h) return false;
+    const i = (y * w + x) * 4;
+    return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114 < 150;
+  };
+
+  // Find a dark seed pixel near the click.
+  let seed = null;
+  outer:
+  for (let r = 0; r <= 7; r++) {
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        if (dark(clickPx + dx, clickPy + dy)) { seed = [clickPx + dx, clickPy + dy]; break outer; }
+      }
+    }
+  }
+  if (!seed) return null;
+
+  const PERP = 4, GAP = 5, MAX_WALK = 20000;
+  // "Still on the line" = any ink within ±PERP px perpendicular — tolerates
+  // wall thickness and a couple degrees of skew.
+  const darkBand = (x, y, horiz) => {
+    for (let p = -PERP; p <= PERP; p++) {
+      if (horiz ? dark(x, y + p) : dark(x + p, y)) return true;
+    }
+    return false;
+  };
+  const walk = (horiz, dir) => {
+    let x = seed[0], y = seed[1], gap = 0, last = horiz ? x : y;
+    for (let i = 0; i < MAX_WALK; i++) {
+      if (horiz) x += dir; else y += dir;
+      if (darkBand(x, y, horiz)) { gap = 0; last = horiz ? x : y; }
+      else if (++gap > GAP) break;
+    }
+    return last;
+  };
+  const x1 = walk(true, -1),  x2 = walk(true, 1);
+  const y1 = walk(false, -1), y2 = walk(false, 1);
+  const hLen = x2 - x1, vLen = y2 - y1;
+  if (Math.max(hLen, vLen) < 12) return null;
+
+  // Center the segment within the line's thickness for a clean centerline.
+  const center = (horiz) => {
+    const base = horiz ? seed[1] : seed[0];
+    let lo = base, hi = base;
+    for (let p = 1; p <= 15; p++) {
+      if (horiz ? dark(seed[0], base - p) : dark(base - p, seed[1])) lo = base - p; else break;
+    }
+    for (let p = 1; p <= 15; p++) {
+      if (horiz ? dark(seed[0], base + p) : dark(base + p, seed[1])) hi = base + p; else break;
+    }
+    return (lo + hi) / 2;
+  };
+
+  if (hLen >= vLen) {
+    const yc = center(true);
+    return [[x1, yc], [x2, yc]];
+  }
+  const xc = center(false);
+  return [[xc, y1], [xc, y2]];
+}
+
 // Min distance from point p to segment ab — for click-to-select hit tests.
 function segDist(p, a, b) {
   const l2 = dist(a, b) ** 2;
@@ -85,6 +167,7 @@ export default function TakeoffView() {
 
   const canvasRef  = useRef(null);
   const overlayRef = useRef(null);
+  const imgRef     = useRef(null);   // image-mode source for wall picking
   const pdfRef     = useRef(null);   // pdf.js document
   const renderTask = useRef(null);
 
@@ -259,6 +342,40 @@ export default function TakeoffView() {
       return;
     }
 
+    if (tool === 'pickwall') {
+      if (!ftPerUnit) { setErr('Calibrate the page scale first (Calibrate tool).'); return; }
+      // Pixel source: rendered PDF canvas (at current zoom) or the image.
+      let src, s;
+      if (isImage) {
+        const img = imgRef.current;
+        if (!img?.naturalWidth) { setErr('Image not ready yet.'); return; }
+        src = document.createElement('canvas');
+        src.width = img.naturalWidth; src.height = img.naturalHeight;
+        src.getContext('2d').drawImage(img, 0, 0);
+        s = 1;
+      } else {
+        src = canvasRef.current;
+        if (!src?.width) { setErr('Drawing not rendered yet.'); return; }
+        s = zoom;
+      }
+      try {
+        const seg = autoTraceWall(src, Math.round(pt[0] * s), Math.round(pt[1] * s));
+        if (!seg) {
+          setErr('No line found there — click directly on the wall line (zoom in helps), or trace it with the Wall tool.');
+          return;
+        }
+        const a = [seg[0][0] / s, seg[0][1] / s];
+        const b = [seg[1][0] / s, seg[1][1] / s];
+        const qty = dist(a, b) * ftPerUnit;
+        if (qty < 1) { setErr('Traced line is too short to be a wall.'); return; }
+        setErr('');
+        await saveItem('wall', [a, b], qty);
+      } catch (e) {
+        setErr(`Trace failed: ${e.message || e}`);
+      }
+      return;
+    }
+
     if (tool === 'region') {
       if (draft.length === 0) { setDraft([pt]); return; }
       const p0 = draft[0];
@@ -401,8 +518,10 @@ export default function TakeoffView() {
           <div style={{ position: 'relative', boxShadow: '0 4px 24px rgba(0,0,0,0.4)' }}>
             {isImage ? (
               <img
+                ref={imgRef}
                 src={signedUrl}
                 alt={file.name}
+                crossOrigin="anonymous"
                 onLoad={onImgLoad}
                 style={{ display: 'block', width: pageSize.w * zoom || 'auto' }}
               />
