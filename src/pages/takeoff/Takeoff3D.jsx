@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import * as pdfjsLib from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { supabase } from '../../lib/supabase.js';
+import { autoTraceWall } from '../../lib/traceWall.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -247,8 +248,10 @@ export default function Takeoff3D() {
   const [showAuto, setShowAuto] = useState(true);
   const [autoMethod, setAutoMethod] = useState('none'); // 'vector' | 'raster' | 'none'
   const [sensitivity, setSensitivity] = useState('med'); // pixel-scan tuning
-  const [pickMode, setPickMode] = useState(false);       // click walls in 3D
-  const cropRef = useRef(null); // plan crop canvas, kept for re-detection
+  const [pickMode, setPickMode] = useState(false);       // click-the-plan wall creation
+  const [selIds, setSelIds] = useState(new Set());       // selected kept walls
+  const [ctxMenu, setCtxMenu] = useState(null);          // {x, y} right-click menu
+  const cropRef = useRef(null); // plan crop canvas, kept for re-detection + tracing
   const pickRef = useRef(false);
   useEffect(() => { pickRef.current = pickMode; }, [pickMode]);
 
@@ -398,6 +401,7 @@ export default function Takeoff3D() {
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(W / 2, 0, H / 2);
+    floor.userData = { kind: 'floor' };
     scene.add(floor);
 
     const wallGroup = new THREE.Group();
@@ -418,15 +422,11 @@ export default function Takeoff3D() {
     };
     window.addEventListener('resize', onResize);
 
-    // Wall picking: a click (not a drag) raycasts into the wall groups and
-    // reports the hit via a DOM event so React state stays fresh.
+    // Picking: a click (not a drag) raycasts walls first, then the floor.
+    // Hits are reported via DOM events so React state stays fresh.
     let downPos = null;
     const onDown = (e) => { downPos = [e.clientX, e.clientY]; };
-    const onUp = (e) => {
-      if (!pickRef.current || !downPos) return;
-      const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]);
-      downPos = null;
-      if (moved > 5) return;    // that was an orbit drag
+    const castAt = (e) => {
       const rect = renderer.domElement.getBoundingClientRect();
       const ndc = new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -434,18 +434,37 @@ export default function Takeoff3D() {
       );
       const ray = new THREE.Raycaster();
       ray.setFromCamera(ndc, camera);
-      const hits = ray.intersectObjects([...autoGroup.children, ...wallGroup.children], false);
+      return ray.intersectObjects([...autoGroup.children, ...wallGroup.children, floor], false);
+    };
+    const onUp = (e) => {
+      if (e.button !== 0 || !pickRef.current || !downPos) return;
+      const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]);
+      if (moved > 5) return;    // that was an orbit drag
+      const hits = castAt(e);
       const hit = hits.find((x) => x.object.userData?.kind);
-      if (hit) window.dispatchEvent(new CustomEvent('takeoff3d-pick', { detail: hit.object.userData }));
+      if (hit) {
+        window.dispatchEvent(new CustomEvent('takeoff3d-pick', {
+          detail: { ...hit.object.userData, point: hit.point },
+        }));
+      }
+    };
+    const onCtx = (e) => {
+      if (!pickRef.current) return;
+      e.preventDefault();
+      const moved = downPos ? Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]) : 0;
+      if (moved > 5) return;    // that was a pan
+      window.dispatchEvent(new CustomEvent('takeoff3d-ctx', { detail: { x: e.clientX, y: e.clientY } }));
     };
     renderer.domElement.addEventListener('pointerdown', onDown);
     renderer.domElement.addEventListener('pointerup', onUp);
+    renderer.domElement.addEventListener('contextmenu', onCtx);
 
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
       renderer.domElement.removeEventListener('pointerdown', onDown);
       renderer.domElement.removeEventListener('pointerup', onUp);
+      renderer.domElement.removeEventListener('contextmenu', onCtx);
       controls.dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
@@ -482,12 +501,15 @@ export default function Takeoff3D() {
       group.add(mesh);
     };
 
-    // traced/kept walls — solid green-gray, clickable to remove in pick mode
+    // traced/kept walls — green; selected ones highlight amber
     for (const it of items.filter((x) => x.tool === 'wall')) {
       const pts = it.points || [];
+      const isSel = selIds.has(it.id);
       for (let i = 1; i < pts.length; i++) {
         wallSeg(w.wallGroup, pts[i - 1], pts[i], {
-          height: wallH, thick: 0.45, color: '#6F8F7F', opacity: Math.min(1, wallOpacity + 0.25),
+          height: wallH, thick: 0.45,
+          color: isSel ? '#E7B93C' : '#6F8F7F',
+          opacity: isSel ? Math.min(1, wallOpacity + 0.45) : Math.min(1, wallOpacity + 0.25),
         }, { kind: 'wall', itemId: it.id });
       }
     }
@@ -537,36 +559,94 @@ export default function Takeoff3D() {
         w.prodGroup.add(mesh);
       }
     }
-  }, [items, autoSegs, showAuto, wallH, wallOpacity, region, ft, texture]);
+  }, [items, autoSegs, showAuto, wallH, wallOpacity, region, ft, texture, selIds]);
 
-  // Handle 3D wall picks: keep an auto candidate (saves as a real wall item)
-  // or remove a kept wall.
+  // Save a wall item from a segment in PDF-unit coords.
+  const saveWallItem = async (a, b) => {
+    const qty = Math.hypot(b[0] - a[0], b[1] - a[1]) * ft;
+    const { data, error } = await supabase.from('takeoff_items').insert({
+      project_id: file.project_id,
+      file_id: fileId,
+      page,
+      tool: 'wall',
+      points: [a, b],
+      qty,
+    }).select('*').single();
+    if (error) { setErr(error.message); return null; }
+    setItems((xs) => [...xs, data]);
+    return data;
+  };
+
+  // Handle 3D picks:
+  //   floor → trace the wall line under the click from the plan pixels and
+  //           stand it up (the point of pick mode)
+  //   auto  → keep the candidate as a real wall
+  //   wall  → toggle selection (right-click deletes the selection)
   useEffect(() => {
     const onPick = async (e) => {
       const ud = e.detail;
-      if (!file || !ft) return;
+      if (!file || !ft || !region) return;
+      setErr('');
+
+      if (ud.kind === 'floor' && ud.point && cropRef.current) {
+        const crop = cropRef.current;
+        const pxPerUnit = crop.width / region.w;
+        // three.js x/z (feet) → plan units → crop canvas pixels
+        const px = (ud.point.x / ft) * pxPerUnit;
+        const py = (ud.point.z / ft) * pxPerUnit;
+        const seg = autoTraceWall(crop, Math.round(px), Math.round(py));
+        if (!seg) {
+          setErr('No line found there — click directly on a wall line on the plan.');
+          return;
+        }
+        const a = [region.x + seg[0][0] / pxPerUnit, region.y + seg[0][1] / pxPerUnit];
+        const b = [region.x + seg[1][0] / pxPerUnit, region.y + seg[1][1] / pxPerUnit];
+        if (Math.hypot(b[0] - a[0], b[1] - a[1]) * ft < 1) {
+          setErr('Traced line is too short to be a wall.');
+          return;
+        }
+        await saveWallItem(a, b);
+        return;
+      }
+
       if (ud.kind === 'auto' && ud.seg) {
-        const [a, b] = ud.seg;
-        const qty = Math.hypot(b[0] - a[0], b[1] - a[1]) * ft;
-        const { data, error } = await supabase.from('takeoff_items').insert({
-          project_id: file.project_id,
-          file_id: fileId,
-          page,
-          tool: 'wall',
-          points: [a, b],
-          qty,
-        }).select('*').single();
-        if (error) { setErr(error.message); return; }
-        setItems((xs) => [...xs, data]);
+        await saveWallItem(ud.seg[0], ud.seg[1]);
         setAutoSegs((segs) => segs.filter((s) => s !== ud.seg));
-      } else if (ud.kind === 'wall' && ud.itemId) {
-        setItems((xs) => xs.filter((x) => x.id !== ud.itemId));
-        await supabase.from('takeoff_items').delete().eq('id', ud.itemId);
+        return;
+      }
+
+      if (ud.kind === 'wall' && ud.itemId) {
+        setSelIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(ud.itemId)) next.delete(ud.itemId);
+          else next.add(ud.itemId);
+          return next;
+        });
       }
     };
+    const onCtx = (e) => {
+      setSelIds((prev) => {
+        if (prev.size > 0) setCtxMenu({ x: e.detail.x, y: e.detail.y });
+        return prev;
+      });
+    };
     window.addEventListener('takeoff3d-pick', onPick);
-    return () => window.removeEventListener('takeoff3d-pick', onPick);
-  }, [file, ft, fileId, page]);
+    window.addEventListener('takeoff3d-ctx', onCtx);
+    return () => {
+      window.removeEventListener('takeoff3d-pick', onPick);
+      window.removeEventListener('takeoff3d-ctx', onCtx);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, ft, fileId, page, region]);
+
+  const deleteSelected = async () => {
+    const ids = Array.from(selIds);
+    if (!ids.length) return;
+    setItems((xs) => xs.filter((x) => !selIds.has(x.id)));
+    setSelIds(new Set());
+    setCtxMenu(null);
+    await supabase.from('takeoff_items').delete().in('id', ids);
+  };
 
   // Cursor feedback for pick mode.
   useEffect(() => {
@@ -655,14 +735,16 @@ export default function Takeoff3D() {
           )}
           <button
             className={`btn sm ${pickMode ? 'primary' : 'ghost'}`}
-            onClick={() => setPickMode((v) => !v)}
+            onClick={() => { setPickMode((v) => !v); setSelIds(new Set()); setCtxMenu(null); }}
           >
-            {pickMode ? '✓ Picking walls — click them' : 'Pick walls'}
+            {pickMode ? '✓ Wall pick mode on' : 'Pick walls on the plan'}
           </button>
           {pickMode && (
             <div style={{ padding: '6px 8px', borderRadius: 6, background: '#FEF3D7', color: '#6B4B00', fontSize: 11.5 }}>
-              Click a <b>gray</b> auto wall to keep it (turns green and saves).
-              Click a <b>green</b> kept wall to remove it. Drag still orbits.
+              <b>Click a wall line on the plan</b> — it traces and stands up.
+              Gray auto walls: click to keep. Green walls: click to select
+              ({selIds.size} selected), then <b>right-click → Delete</b>.
+              Drag still orbits.
             </div>
           )}
           <div className="muted" style={{ fontSize: 11.5 }}>
@@ -685,6 +767,39 @@ export default function Takeoff3D() {
             </>
           )}
         </div>
+      )}
+
+      {/* right-click menu for selected walls */}
+      {ctxMenu && (
+        <>
+          {/* click-away backdrop */}
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+            onClick={() => setCtxMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}
+          />
+          <div style={{
+            position: 'fixed', left: ctxMenu.x, top: ctxMenu.y, zIndex: 41,
+            background: 'var(--surface)', borderRadius: 8, padding: 6,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.35)', minWidth: 180,
+            display: 'flex', flexDirection: 'column', gap: 2, fontSize: 13,
+          }}>
+            <button
+              className="btn sm"
+              style={{ justifyContent: 'flex-start', border: 0, color: '#B3261E' }}
+              onClick={deleteSelected}
+            >
+              Delete {selIds.size} selected wall{selIds.size === 1 ? '' : 's'}
+            </button>
+            <button
+              className="btn sm ghost"
+              style={{ justifyContent: 'flex-start', border: 0 }}
+              onClick={() => { setSelIds(new Set()); setCtxMenu(null); }}
+            >
+              Clear selection
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
