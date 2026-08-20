@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase.js';
 import { SLOT_SUGGESTIONS, LABOR_OPS, defaultRateForOp } from '../../lib/productCost.js';
+import { evalFormula, instanceFactor } from '../../lib/formula.js';
 
 /**
  * Product builder — drilldown level 2: the full parameter editor.
@@ -56,7 +57,7 @@ export default function ProductDetail() {
       if (isNew) {
         // Seed the universal op list so the estimator fills in hours, not rows.
         setLabor(LABOR_OPS.map((op, i) => ({
-          id: `new_${i}`, op, hours_per_unit: 0, rate: defaultRateForOp(op, rateList),
+          id: `new_${i}`, op, formula: '0', rate: defaultRateForOp(op, rateList),
         })));
         setLoading(false);
         return;
@@ -67,9 +68,9 @@ export default function ProductDetail() {
         .select(`
           id, name, category, unit, description, notes,
           default_width_ft, default_height_ft, default_depth_ft,
-          product_materials ( id, slot, qty_per_unit, waste_pct, sort_order,
+          product_materials ( id, slot, qty_per_unit, qty_formula, waste_pct, sort_order,
             material:material_id ( id, name, description, manufacturer, category, unit, unit_cost, waste_pct ) ),
-          product_labor ( id, op, hours_per_unit, sort_order,
+          product_labor ( id, op, hours_per_unit, hours_formula, sort_order,
             rate:labor_rate_id ( id, name, hourly_rate ) )
         `)
         .eq('id', id)
@@ -77,26 +78,37 @@ export default function ProductDetail() {
       if (cancelled) return;
       if (error) { setErr(error.message); setLoading(false); return; }
       if (data) {
+        const W = Number(data.default_width_ft) || 3;
+        const H = Number(data.default_height_ft) || 3;
         setForm({
           name: data.name || '', category: data.category || '',
           unit: data.unit || 'LF', description: data.description || '', notes: data.notes || '',
-          default_width_ft: Number(data.default_width_ft) || 3,
-          default_height_ft: Number(data.default_height_ft) || 3,
+          default_width_ft: W,
+          default_height_ft: H,
           default_depth_ft: Number(data.default_depth_ft) || 2,
         });
-        setComps((data.product_materials || []).sort((a, b) => a.sort_order - b.sort_order));
+        // Rows without a saved formula (pre-formula era) get their stored
+        // per-base qty converted back to per-instance for display.
+        const factor = instanceFactor(data.unit || 'LF', W, H);
+        setComps((data.product_materials || [])
+          .sort((a, b) => a.sort_order - b.sort_order)
+          .map((pm) => ({
+            ...pm,
+            formula: pm.qty_formula || String(+(Number(pm.qty_per_unit || 0) * factor).toFixed(4)),
+          })));
 
         // Merge saved ops onto the universal list; keep custom ops too.
         const saved = (data.product_labor || []).sort((a, b) => a.sort_order - b.sort_order);
+        const toFormula = (s) => s.hours_formula || String(+(Number(s.hours_per_unit || 0) * factor).toFixed(4));
         const merged = LABOR_OPS.map((op, i) => {
           const hit = saved.find((s) => (s.op || s.rate?.name) === op);
           return hit
-            ? { id: hit.id, op, hours_per_unit: Number(hit.hours_per_unit), rate: hit.rate }
-            : { id: `op_${i}`, op, hours_per_unit: 0, rate: defaultRateForOp(op, rateList) };
+            ? { id: hit.id, op, formula: toFormula(hit), rate: hit.rate }
+            : { id: `op_${i}`, op, formula: '0', rate: defaultRateForOp(op, rateList) };
         });
         for (const s of saved) {
           if (!merged.some((m) => m.id === s.id)) {
-            merged.push({ id: s.id, op: s.op || s.rate?.name || 'Custom', hours_per_unit: Number(s.hours_per_unit), rate: s.rate });
+            merged.push({ id: s.id, op: s.op || s.rate?.name || 'Custom', formula: toFormula(s), rate: s.rate });
           }
         }
         setLabor(merged);
@@ -125,8 +137,28 @@ export default function ProductDetail() {
     return () => { cancelled = true; clearTimeout(t); };
   }, [matQ, pickFor]);
 
+  // Sensible starting formulas per slot so the estimator edits, not invents.
+  const DEFAULT_FORMULAS = {
+    'Case Sides': 'H * D * 2',
+    'Case Top/Bottom': 'W * D * 2',
+    'Case Back': 'W * H',
+    'Shelves': 'W * D',
+    'Toe Kick': 'W',
+    'Doors': 'W * H',
+    'Drawer Fronts': 'W * H',
+    'Panel Face': 'W * H',
+    'Substrate': 'W * H',
+    'Countertop': 'W * D',
+    'Edgebanding': 'W * 4 + H * 2',
+    'Trim': 'W',
+  };
+
   const addComp = (slot = '') => {
-    const row = { id: `new_${crypto.randomUUID()}`, slot, qty_per_unit: 1, waste_pct: 0, material: null };
+    const row = {
+      id: `new_${crypto.randomUUID()}`, slot,
+      formula: DEFAULT_FORMULAS[slot] || '1',
+      waste_pct: 0, material: null,
+    };
     setComps((cs) => [...cs, row]);
     setPickFor(row.id); setMatQ(''); setMatResults([]);
   };
@@ -142,27 +174,49 @@ export default function ProductDetail() {
     const name = prompt('Operation name:');
     if (!name?.trim()) return;
     setLabor((ls) => [...ls, {
-      id: `new_${crypto.randomUUID()}`, op: name.trim(), hours_per_unit: 0,
+      id: `new_${crypto.randomUUID()}`, op: name.trim(), formula: '0',
       rate: defaultRateForOp(name, rates),
     }]);
+  };
+
+  // ---- formula evaluation (per instance, converted to base unit) ----
+  const dims = {
+    W: Number(form.default_width_ft) || 0,
+    H: Number(form.default_height_ft) || 0,
+    D: Number(form.default_depth_ft) || 0,
+  };
+  const factor = instanceFactor(form.unit, dims.W, dims.H);
+  const perInstance = (formula) => evalFormula(formula, dims);
+  const perBase = (formula) => {
+    const v = perInstance(formula);
+    return Number.isFinite(v) ? v / factor : NaN;
   };
 
   // ---- live rollup ----
   const rollup = useMemo(() => {
     const material = comps.reduce((s, pm) => {
       if (!pm.material) return s;
+      const q = perBase(pm.formula);
+      if (!Number.isFinite(q)) return s;
       const waste = Number(pm.waste_pct || 0) > 0 ? Number(pm.waste_pct) : Number(pm.material?.waste_pct || 0);
-      return s + Number(pm.qty_per_unit || 0) * Number(pm.material?.unit_cost || 0) * (1 + waste / 100);
+      return s + q * Number(pm.material?.unit_cost || 0) * (1 + waste / 100);
     }, 0);
-    const laborCost = labor.reduce((s, pl) =>
-      s + Number(pl.hours_per_unit || 0) * Number(pl.rate?.hourly_rate || 0), 0);
+    const laborCost = labor.reduce((s, pl) => {
+      const h = perBase(pl.formula);
+      return s + (Number.isFinite(h) ? h : 0) * Number(pl.rate?.hourly_rate || 0);
+    }, 0);
     return { material, labor: laborCost, total: material + laborCost };
-  }, [comps, labor]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [comps, labor, form.default_width_ft, form.default_height_ft, form.default_depth_ft, form.unit]);
 
   const save = async (e) => {
     e?.preventDefault();
     if (!form.name.trim()) { setErr('Name is required.'); return; }
     if (comps.some((c) => !c.material)) { setErr('Every component needs a material — remove empty rows or pick one.'); return; }
+    const badComp = comps.find((c) => !Number.isFinite(perInstance(c.formula)));
+    if (badComp) { setErr(`Bad formula on "${badComp.slot || 'component'}": ${badComp.formula} — use numbers and W, H, D.`); return; }
+    const badOp = labor.find((l) => !Number.isFinite(perInstance(l.formula)));
+    if (badOp) { setErr(`Bad hours formula on "${badOp.op}": ${badOp.formula} — use numbers and W, H, D.`); return; }
     setSaving(true); setErr(''); setMsg('');
 
     const header = {
@@ -191,21 +245,25 @@ export default function ProductDetail() {
           product_id: productId,
           material_id: pm.material.id,
           slot: pm.slot || null,
-          qty_per_unit: Number(pm.qty_per_unit || 0),
+          qty_formula: pm.formula,
+          // Cache the compiled per-base-unit number so cost math elsewhere
+          // (estimator, takeoff, overview) never has to re-evaluate.
+          qty_per_unit: +(perBase(pm.formula)).toFixed(6),
           waste_pct: Number(pm.waste_pct || 0),
           sort_order: i,
         }))
       );
       if (error) { setSaving(false); setErr(error.message); return; }
     }
-    const laborToSave = labor.filter((pl) => Number(pl.hours_per_unit) > 0 && pl.rate);
+    const laborToSave = labor.filter((pl) => Number.isFinite(perInstance(pl.formula)) && perInstance(pl.formula) > 0 && pl.rate);
     if (laborToSave.length) {
       const { error } = await supabase.from('product_labor').insert(
         laborToSave.map((pl, i) => ({
           product_id: productId,
           labor_rate_id: pl.rate.id,
           op: pl.op,
-          hours_per_unit: Number(pl.hours_per_unit || 0),
+          hours_formula: pl.formula,
+          hours_per_unit: +(perBase(pl.formula)).toFixed(6),
           sort_order: i,
         }))
       );
@@ -285,8 +343,11 @@ export default function ProductDetail() {
               </label>
             </div>
             <p className="muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-              Components and labor below are <b>per 1 {form.unit}</b>. Default size converts other
-              takeoff measurements (count / LF / SF) into {form.unit}.
+              Component and labor formulas below are <b>per one product</b> and can use its dimensions:
+              {' '}<code>W</code> = {dims.W}′ width, <code>H</code> = {dims.H}′ height, <code>D</code> = {dims.D}′ depth.
+              Example: Case Sides = <code>H * D * 2</code>. The system converts to cost per {form.unit} automatically
+              {form.unit === 'LF' && <> (÷ {dims.W}′ width)</>}
+              {form.unit === 'SF' && <> (÷ {dims.W}′ × {dims.H}′ face)</>}.
             </p>
           </div>
 
@@ -322,8 +383,11 @@ export default function ProductDetail() {
             ) : (
               <div className="stack" style={{ gap: 8 }}>
                 {comps.map((pm) => {
+                  const inst = perInstance(pm.formula);
+                  const q = perBase(pm.formula);
+                  const bad = !Number.isFinite(inst);
                   const waste = Number(pm.waste_pct || 0) > 0 ? Number(pm.waste_pct) : Number(pm.material?.waste_pct || 0);
-                  const ext = pm.material ? Number(pm.qty_per_unit || 0) * Number(pm.material.unit_cost || 0) * (1 + waste / 100) : 0;
+                  const ext = pm.material && !bad ? q * Number(pm.material.unit_cost || 0) * (1 + waste / 100) : 0;
                   return (
                     <div key={pm.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, background: 'var(--surface-alt)' }}>
                       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -356,8 +420,17 @@ export default function ProductDetail() {
                           )}
                         </div>
                         <label style={{ fontSize: 11.5, color: 'var(--text-muted)', display: 'grid', gap: 2 }}>
-                          Qty / {form.unit}
-                          <input type="number" step="0.0001" value={pm.qty_per_unit} onChange={(e) => patchComp(pm.id, 'qty_per_unit', e.target.value)} style={{ width: 90, textAlign: 'right' }} />
+                          Qty formula (per product)
+                          <input
+                            value={pm.formula}
+                            onChange={(e) => patchComp(pm.id, 'formula', e.target.value)}
+                            placeholder="e.g., H * D * 2"
+                            style={{
+                              width: 150, textAlign: 'right', fontFamily: 'ui-monospace, monospace', fontSize: 12.5,
+                              border: `1px solid ${bad ? 'var(--danger)' : 'var(--border-strong)'}`,
+                              borderRadius: 6, padding: '5px 7px',
+                            }}
+                          />
                         </label>
                         <label style={{ fontSize: 11.5, color: 'var(--text-muted)', display: 'grid', gap: 2 }}>
                           Waste %
@@ -365,6 +438,11 @@ export default function ProductDetail() {
                         </label>
                         <div style={{ width: 80, textAlign: 'right', fontWeight: 700 }} className="money">{ext.toFixed(2)}</div>
                         <button type="button" className="btn sm ghost" onClick={() => dropComp(pm.id)}>×</button>
+                      </div>
+                      <div className="muted" style={{ fontSize: 11.5, marginTop: 4, textAlign: 'right' }}>
+                        {bad
+                          ? <span style={{ color: 'var(--danger)' }}>Formula error — use numbers and W, H, D</span>
+                          : <>= {inst.toFixed(2)} {pm.material?.unit || ''} per product{form.unit !== 'EA' && <> → {q.toFixed(3)} per {form.unit}</>}</>}
                       </div>
 
                       {/* inline material search for this slot */}
@@ -426,36 +504,50 @@ export default function ProductDetail() {
                 <thead>
                   <tr>
                     <th>Operation</th>
-                    <th style={{ width: 220 }}>Rate</th>
-                    <th style={{ width: 110 }} className="right">Hrs / {form.unit}</th>
+                    <th style={{ width: 200 }}>Rate</th>
+                    <th style={{ width: 150 }} className="right">Hours (per product)</th>
+                    <th style={{ width: 100 }} className="right">Hrs / {form.unit}</th>
                     <th style={{ width: 90 }} className="right">Cost</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {labor.map((pl) => (
-                    <tr key={pl.id} style={{ opacity: Number(pl.hours_per_unit) > 0 ? 1 : 0.65 }}>
-                      <td style={{ fontWeight: 600 }}>{pl.op}</td>
-                      <td>
-                        <select
-                          value={pl.rate?.id || ''}
-                          onChange={(e) => {
-                            const r = rates.find((x) => x.id === e.target.value);
-                            if (r) patchLabor(pl.id, 'rate', r);
-                          }}
-                          style={{ width: '100%' }}
-                        >
-                          {rates.length === 0 && <option value="">— add rates on the Labor page —</option>}
-                          {rates.map((r) => <option key={r.id} value={r.id}>{r.name} (${Number(r.hourly_rate).toFixed(2)}/hr)</option>)}
-                        </select>
-                      </td>
-                      <td>
-                        <input type="number" step="0.01" min="0" value={pl.hours_per_unit}
-                          onChange={(e) => patchLabor(pl.id, 'hours_per_unit', e.target.value)}
-                          style={{ width: '100%', textAlign: 'right' }} />
-                      </td>
-                      <td className="right money">{(Number(pl.hours_per_unit || 0) * Number(pl.rate?.hourly_rate || 0)).toFixed(2)}</td>
-                    </tr>
-                  ))}
+                  {labor.map((pl) => {
+                    const inst = perInstance(pl.formula);
+                    const h = perBase(pl.formula);
+                    const bad = !Number.isFinite(inst);
+                    return (
+                      <tr key={pl.id} style={{ opacity: !bad && inst > 0 ? 1 : 0.65 }}>
+                        <td style={{ fontWeight: 600 }}>{pl.op}</td>
+                        <td>
+                          <select
+                            value={pl.rate?.id || ''}
+                            onChange={(e) => {
+                              const r = rates.find((x) => x.id === e.target.value);
+                              if (r) patchLabor(pl.id, 'rate', r);
+                            }}
+                            style={{ width: '100%' }}
+                          >
+                            {rates.length === 0 && <option value="">— add rates on the Labor page —</option>}
+                            {rates.map((r) => <option key={r.id} value={r.id}>{r.name} (${Number(r.hourly_rate).toFixed(2)}/hr)</option>)}
+                          </select>
+                        </td>
+                        <td>
+                          <input
+                            value={pl.formula}
+                            onChange={(e) => patchLabor(pl.id, 'formula', e.target.value)}
+                            placeholder="e.g., 0.5 or W * 0.2"
+                            style={{
+                              width: '100%', textAlign: 'right', fontFamily: 'ui-monospace, monospace', fontSize: 12.5,
+                              border: `1px solid ${bad ? 'var(--danger)' : 'var(--border-strong)'}`,
+                              borderRadius: 6, padding: '5px 7px',
+                            }}
+                          />
+                        </td>
+                        <td className="right muted">{bad ? '—' : h.toFixed(3)}</td>
+                        <td className="right money">{bad ? '—' : (h * Number(pl.rate?.hourly_rate || 0)).toFixed(2)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

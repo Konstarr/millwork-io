@@ -26,9 +26,9 @@ export default function ProductOverview() {
         .select(`
           id, name, category, unit, description, notes,
           default_width_ft, default_height_ft, default_depth_ft,
-          product_materials ( id, slot, qty_per_unit, waste_pct, sort_order,
+          product_materials ( id, slot, qty_per_unit, qty_formula, waste_pct, sort_order,
             material:material_id ( id, description, name, manufacturer, category, unit, unit_cost, waste_pct ) ),
-          product_labor ( id, op, hours_per_unit, sort_order,
+          product_labor ( id, op, hours_per_unit, hours_formula, sort_order,
             rate:labor_rate_id ( id, name, hourly_rate ) )
         `)
         .eq('id', id)
@@ -109,14 +109,21 @@ export default function ProductOverview() {
                 <tbody>
                   {comps.map((pm) => (
                     <tr key={pm.id}>
-                      <td style={{ fontWeight: 600 }}>{pm.slot || '—'}</td>
+                      <td style={{ fontWeight: 600 }}>
+                        {pm.slot || '—'}
+                        {pm.qty_formula && (
+                          <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }}>
+                            = {pm.qty_formula}
+                          </div>
+                        )}
+                      </td>
                       <td>
                         <div style={{ fontSize: 13 }}>{pm.material?.description || pm.material?.name}</div>
                         <div className="muted" style={{ fontSize: 11.5 }}>
                           {[pm.material?.manufacturer, `$${Number(pm.material?.unit_cost || 0).toFixed(2)}/${pm.material?.unit}`].filter(Boolean).join(' · ')}
                         </div>
                       </td>
-                      <td className="right muted">{Number(pm.qty_per_unit)} {pm.material?.unit}</td>
+                      <td className="right muted">{Number(pm.qty_per_unit).toFixed(3)} {pm.material?.unit}</td>
                       <td className="right money">{compCost(pm).toFixed(2)}</td>
                     </tr>
                   ))}
@@ -149,9 +156,16 @@ export default function ProductOverview() {
                 <tbody>
                   {ops.map((pl) => (
                     <tr key={pl.id}>
-                      <td style={{ fontWeight: 600 }}>{pl.op || pl.rate?.name || '—'}</td>
+                      <td style={{ fontWeight: 600 }}>
+                        {pl.op || pl.rate?.name || '—'}
+                        {pl.hours_formula && (
+                          <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }}>
+                            = {pl.hours_formula} h/product
+                          </div>
+                        )}
+                      </td>
                       <td className="muted">{pl.rate?.name} — ${Number(pl.rate?.hourly_rate || 0).toFixed(2)}/hr</td>
-                      <td className="right muted">{Number(pl.hours_per_unit)}</td>
+                      <td className="right muted">{Number(pl.hours_per_unit).toFixed(3)}</td>
                       <td className="right money">{(Number(pl.hours_per_unit || 0) * Number(pl.rate?.hourly_rate || 0)).toFixed(2)}</td>
                     </tr>
                   ))}
