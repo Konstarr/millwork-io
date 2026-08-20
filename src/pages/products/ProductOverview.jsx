@@ -24,7 +24,7 @@ export default function ProductOverview() {
       const { data, error } = await supabase
         .from('products')
         .select(`
-          id, name, category, unit, description, notes,
+          id, name, category, unit, description, notes, params,
           default_width_ft, default_height_ft, default_depth_ft,
           product_materials ( id, slot, qty_per_unit, qty_formula, waste_pct, sort_order,
             material:material_id ( id, description, name, manufacturer, category, unit, unit_cost, waste_pct ) ),
@@ -87,6 +87,12 @@ export default function ProductOverview() {
           label="Default size"
           text={`${Number(p.default_width_ft)}′W × ${Number(p.default_height_ft)}′H × ${Number(p.default_depth_ft)}′D`}
         />
+        {Object.keys(p.params || {}).length > 0 && (
+          <SummaryTile
+            label="Parameters"
+            text={Object.entries(p.params).map(([k, v]) => `${k}=${v}`).join('  ')}
+          />
+        )}
       </div>
 
       <div style={{ display: 'grid', gap: 16, gridTemplateColumns: 'repeat(auto-fit, minmax(380px, 1fr))', alignItems: 'start' }}>

@@ -104,6 +104,7 @@ export default function TakeoffView() {
 
   const [tool, setTool]           = useState('select');
   const [productId, setProductId] = useState('');
+  const [paramValues, setParamValues] = useState({}); // per-placement param knobs
   const [draft, setDraft]         = useState([]);   // in-progress points (units)
   const [selected, setSelected]   = useState(null); // takeoff item id
   const [err, setErr]             = useState('');
@@ -119,9 +120,10 @@ export default function TakeoffView() {
       const [f, pd] = await Promise.all([
         supabase.from('project_files').select('*').eq('id', fileId).maybeSingle(),
         supabase.from('products').select(`
-          id, name, category, unit, default_width_ft, default_height_ft,
-          product_materials ( qty_per_unit, waste_pct, material:material_id ( unit_cost, waste_pct ) ),
-          product_labor     ( hours_per_unit, rate:labor_rate_id ( hourly_rate ) )
+          id, name, category, unit, params,
+          default_width_ft, default_height_ft, default_depth_ft,
+          product_materials ( qty_per_unit, qty_formula, waste_pct, material:material_id ( unit_cost, waste_pct ) ),
+          product_labor     ( hours_per_unit, hours_formula, rate:labor_rate_id ( hourly_rate ) )
         `).order('name'),
       ]);
       if (cancelled) return;
@@ -182,15 +184,18 @@ export default function TakeoffView() {
 
   // ---------- item persistence ----------
   const saveItem = async (toolKind, pts, qty) => {
+    const isProductTool = toolKind !== 'wall';
     const { data, error } = await supabase.from('takeoff_items').insert({
       project_id: file.project_id,
       file_id: fileId,
       page,
-      // Walls belong to no product — they define geometry for the 3D view.
-      product_id: toolKind === 'wall' ? null : (productId || null),
+      // Walls belong to no product — pure LF geometry.
+      product_id: isProductTool ? (productId || null) : null,
       tool: toolKind,
       points: pts,
       qty,
+      // Snapshot the parameter knobs for this placement (e.g. SHELFQTY 5).
+      param_overrides: isProductTool && productId ? paramValues : {},
     }).select('*').single();
     if (error) { setErr(error.message); return; }
     setItems((xs) => [...xs, data]);
@@ -341,15 +346,31 @@ export default function TakeoffView() {
   // ---------- aggregation ----------
   const productById = useMemo(() => Object.fromEntries(products.map((p) => [p.id, p])), [products]);
 
-  // Totals per product, converted from each item's measured quantity
-  // (EA/LF/SF depending on tool) into the product's BASE unit via its
-  // default dimensions — one product, measured any way.
+  // Reset the parameter knobs to the product's defaults when it changes.
+  useEffect(() => {
+    const p = productById[productId];
+    setParamValues(p?.params ? { ...p.params } : {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productId]);
+
+  const paramSummary = (ov) => {
+    const entries = Object.entries(ov || {});
+    if (!entries.length) return '';
+    return entries.map(([k, v]) => `${k} ${v}`).join(', ');
+  };
+
+  // Totals per product CONFIGURATION: same product with different parameter
+  // overrides (SHELFQTY 3 vs 5) groups — and prices — separately. Measured
+  // qty converts into the product's base unit via its dimensions.
   const groups = useMemo(() => {
     const g = {};
     for (const it of items) {
-      const key = it.product_id || '_none';
       const p = productById[it.product_id];
-      if (!g[key]) g[key] = { product: p, qty: 0, count: 0 };
+      const ov = it.param_overrides || {};
+      const key = it.product_id
+        ? `${it.product_id}|${JSON.stringify(Object.fromEntries(Object.entries(ov).sort()))}`
+        : '_none';
+      if (!g[key]) g[key] = { product: p, overrides: ov, qty: 0, count: 0 };
       g[key].qty += p ? convertToBase(p, it.tool, it.qty) : Number(it.qty || 0);
       g[key].count += 1;
     }
@@ -361,13 +382,14 @@ export default function TakeoffView() {
     if (!entries.length) { setErr('No product takeoff to send yet.'); return; }
     setBusy(true); setErr('');
 
-    const linesPayload = entries.map(([pid, v], i) => {
-      const p = productById[pid];
-      const c = computeProductCost(p);
+    const linesPayload = entries.map(([, v], i) => {
+      const p = v.product;
+      const c = computeProductCost(p, v.overrides);
+      const cfg = paramSummary(v.overrides);
       return {
         kind: 'product',
-        product_id: pid,
-        description: `${p.name}${p.category ? ` (${p.category})` : ''} — takeoff`,
+        product_id: p.id,
+        description: `${p.name}${p.category ? ` (${p.category})` : ''}${cfg ? ` [${cfg}]` : ''} — takeoff`,
         quantity: Number(v.qty.toFixed(2)),
         unit: p.unit,
         unit_cost: Number(c.total.toFixed(4)),
@@ -590,6 +612,30 @@ export default function TakeoffView() {
                 <span className="muted">marker color on drawing</span>
               </div>
             )}
+
+            {/* quick-adjust parameter knobs — snapshot onto each placement */}
+            {productId && Object.keys(paramValues).length > 0 && (
+              <div style={{ marginTop: 8, padding: '8px 10px', background: 'var(--surface-alt)', border: '1px solid var(--border)', borderRadius: 8, display: 'grid', gap: 6 }}>
+                {Object.entries(paramValues).map(([name, value]) => (
+                  <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <code style={{ fontSize: 11.5, fontWeight: 700, flex: 1 }}>{name}</code>
+                    <button className="btn sm ghost" style={{ padding: '1px 8px' }}
+                      onClick={() => setParamValues((v) => ({ ...v, [name]: Math.max(0, (Number(v[name]) || 0) - 1) }))}>−</button>
+                    <input
+                      type="number"
+                      value={value}
+                      onChange={(e) => setParamValues((v) => ({ ...v, [name]: Number(e.target.value) }))}
+                      style={{ width: 56, textAlign: 'center', padding: '3px 4px', border: '1px solid var(--border-strong)', borderRadius: 5, font: 'inherit', fontSize: 12.5 }}
+                    />
+                    <button className="btn sm ghost" style={{ padding: '1px 8px' }}
+                      onClick={() => setParamValues((v) => ({ ...v, [name]: (Number(v[name]) || 0) + 1 }))}>+</button>
+                  </div>
+                ))}
+                <div className="muted" style={{ fontSize: 10.5 }}>
+                  Applied to placements you make next — different values group as separate configurations.
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -604,15 +650,19 @@ export default function TakeoffView() {
             <div className="muted" style={{ fontSize: 12.5 }}>Nothing measured yet.</div>
           ) : (
             <div style={{ display: 'grid', gap: 6 }}>
-              {Object.entries(groups).map(([pid, g]) => (
-                <div key={pid} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, padding: '6px 8px', background: 'var(--surface-alt)', borderRadius: 6 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 5, background: pid === '_none' ? '#E45757' : colorFor(pid), flexShrink: 0 }} />
-                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {g.product?.name || 'Unassigned'}
-                  </span>
-                  <b>{g.qty.toFixed(1)} {g.product?.unit || ''}</b>
-                </div>
-              ))}
+              {Object.entries(groups).map(([key, g]) => {
+                const cfg = paramSummary(g.overrides);
+                return (
+                  <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, padding: '6px 8px', background: 'var(--surface-alt)', borderRadius: 6 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 5, background: g.product ? colorFor(g.product.id) : '#E45757', flexShrink: 0 }} />
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {g.product?.name || 'Unassigned'}
+                      {cfg && <span className="muted" style={{ fontSize: 11 }}> [{cfg}]</span>}
+                    </span>
+                    <b>{g.qty.toFixed(1)} {g.product?.unit || ''}</b>
+                  </div>
+                );
+              })}
             </div>
           )}
 

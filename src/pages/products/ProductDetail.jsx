@@ -32,8 +32,9 @@ export default function ProductDetail() {
     name: '', category: '', unit: 'LF', description: '', notes: '',
     default_width_ft: 3, default_height_ft: 3, default_depth_ft: 2,
   });
-  const [comps, setComps]   = useState([]);  // { id, slot, qty_per_unit, waste_pct, material }
-  const [labor, setLabor]   = useState([]);  // { id, op, hours_per_unit, rate }
+  const [params, setParams] = useState([]); // [{ name: 'SHELFQTY', value: 3 }]
+  const [comps, setComps]   = useState([]);  // { id, slot, formula, waste_pct, material }
+  const [labor, setLabor]   = useState([]);  // { id, op, formula, rate }
   const [rates, setRates]   = useState([]);
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving]   = useState(false);
@@ -66,7 +67,7 @@ export default function ProductDetail() {
       const { data, error } = await supabase
         .from('products')
         .select(`
-          id, name, category, unit, description, notes,
+          id, name, category, unit, description, notes, params,
           default_width_ft, default_height_ft, default_depth_ft,
           product_materials ( id, slot, qty_per_unit, qty_formula, waste_pct, sort_order,
             material:material_id ( id, name, description, manufacturer, category, unit, unit_cost, waste_pct ) ),
@@ -87,6 +88,7 @@ export default function ProductDetail() {
           default_height_ft: H,
           default_depth_ft: Number(data.default_depth_ft) || 2,
         });
+        setParams(Object.entries(data.params || {}).map(([name, value]) => ({ name, value })));
         // Rows without a saved formula (pre-formula era) get their stored
         // per-base qty converted back to per-instance for display.
         const factor = instanceFactor(data.unit || 'LF', W, H);
@@ -142,7 +144,7 @@ export default function ProductDetail() {
     'Case Sides': 'H * D * 2',
     'Case Top/Bottom': 'W * D * 2',
     'Case Back': 'W * H',
-    'Shelves': 'W * D',
+    'Shelves': 'W * D * SHELFQTY',
     'Stretchers': '(W * 4") * 4',
     'Toe Kick': 'W * 4"',
     'Doors': 'W * H',
@@ -154,7 +156,16 @@ export default function ProductDetail() {
     'Trim': 'W',
   };
 
+  // Params some default formulas rely on — auto-created when the slot is added.
+  const SLOT_PARAMS = {
+    'Shelves': { name: 'SHELFQTY', value: 2 },
+  };
+
   const addComp = (slot = '') => {
+    const needed = SLOT_PARAMS[slot];
+    if (needed && !params.some((p) => p.name === needed.name)) {
+      setParams((ps) => [...ps, { ...needed }]);
+    }
     const row = {
       id: `new_${crypto.randomUUID()}`, slot,
       formula: DEFAULT_FORMULAS[slot] || '1',
@@ -163,6 +174,20 @@ export default function ProductDetail() {
     setComps((cs) => [...cs, row]);
     setPickFor(row.id); setMatQ(''); setMatResults([]);
   };
+
+  // ---- custom parameter rows ----
+  const RESERVED = ['W', 'H', 'D', 'X'];
+  const addParam = () => {
+    const raw = prompt('Parameter name (used in formulas, e.g. SHELFQTY):');
+    if (!raw) return;
+    const name = raw.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '');
+    if (!name || /^[0-9]/.test(name)) { setErr('Parameter names must start with a letter.'); return; }
+    if (RESERVED.includes(name)) { setErr(`${name} is reserved.`); return; }
+    if (params.some((p) => p.name === name)) { setErr(`${name} already exists.`); return; }
+    setParams((ps) => [...ps, { name, value: 1 }]);
+  };
+  const patchParam = (name, value) => setParams((ps) => ps.map((p) => p.name === name ? { ...p, value } : p));
+  const dropParam  = (name) => setParams((ps) => ps.filter((p) => p.name !== name));
   const patchComp = (rid, k, v) => setComps((cs) => cs.map((r) => r.id === rid ? { ...r, [k]: v } : r));
   const dropComp  = (rid) => { setComps((cs) => cs.filter((r) => r.id !== rid)); if (pickFor === rid) setPickFor(null); };
   const assignMaterial = (rid, m) => {
@@ -185,6 +210,7 @@ export default function ProductDetail() {
     W: Number(form.default_width_ft) || 0,
     H: Number(form.default_height_ft) || 0,
     D: Number(form.default_depth_ft) || 0,
+    ...Object.fromEntries(params.map((p) => [p.name, Number(p.value) || 0])),
   };
   const factor = instanceFactor(form.unit, dims.W, dims.H);
   const perInstance = (formula) => evalFormula(formula, dims);
@@ -225,6 +251,7 @@ export default function ProductDetail() {
       default_width_ft: Number(form.default_width_ft) || 3,
       default_height_ft: Number(form.default_height_ft) || 3,
       default_depth_ft: Number(form.default_depth_ft) || 2,
+      params: Object.fromEntries(params.map((p) => [p.name, Number(p.value) || 0])),
     };
 
     let productId = id;
@@ -343,11 +370,40 @@ export default function ProductDetail() {
                 <textarea rows={2} value={form.description} onChange={(e) => set('description', e.target.value)} placeholder="Construction notes, finish assumptions…" />
               </label>
             </div>
+            {/* custom parameters — extra formula variables, adjustable per-placement in takeoff */}
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <h3 style={{ margin: 0 }}>Parameters</h3>
+                <button type="button" className="btn sm" onClick={addParam}>+ Add parameter</button>
+              </div>
+              {params.length === 0 ? (
+                <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                  No custom parameters. Add one (e.g. <code>SHELFQTY</code>) to use in formulas —
+                  it becomes a quick-adjust knob in takeoff.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                  {params.map((p) => (
+                    <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--surface-alt)', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 10px' }}>
+                      <code style={{ fontSize: 12.5, fontWeight: 700 }}>{p.name}</code>
+                      <input
+                        type="number" step="1" value={p.value}
+                        onChange={(e) => patchParam(p.name, e.target.value)}
+                        style={{ width: 64, textAlign: 'right', padding: '4px 6px', border: '1px solid var(--border-strong)', borderRadius: 5, font: 'inherit', fontSize: 13 }}
+                      />
+                      <button type="button" className="btn sm ghost" style={{ padding: '1px 7px' }} onClick={() => dropParam(p.name)}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <p className="muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
               Component and labor formulas below are <b>per one product</b> and can use its dimensions:
               {' '}<code>W</code> = {dims.W}′ width, <code>H</code> = {dims.H}′ height, <code>D</code> = {dims.D}′ depth.
               Hard measurements work too: <code>4"</code> = 4 inches, <code>2'</code> = 2 feet, and <code>x</code> multiplies.
-              Examples: Case Sides = <code>H * D * 2</code> · Stretchers = <code>(W * 4") x 4</code>.
+              {params.length > 0 && <> Custom parameters: {params.map((p) => <code key={p.name} style={{ marginRight: 4 }}>{p.name}</code>)}.</>}
+              {' '}Examples: Case Sides = <code>H * D * 2</code> · Shelves = <code>W * D * SHELFQTY</code>.
               The system converts to cost per {form.unit} automatically
               {form.unit === 'LF' && <> (÷ {dims.W}′ width)</>}
               {form.unit === 'SF' && <> (÷ {dims.W}′ × {dims.H}′ face)</>}.

@@ -8,10 +8,36 @@
  * area.
  */
 
-/** Roll a product's components up into a per-base-unit cost. */
-export function computeProductCost(product) {
+import { evalFormula, instanceFactor } from './formula.js';
+
+/** Variable set for a product's formulas: dims + custom params + overrides. */
+export function productVars(product, overrides = {}) {
+  return {
+    W: Number(product?.default_width_ft) || 3,
+    H: Number(product?.default_height_ft) || 3,
+    D: Number(product?.default_depth_ft) || 2,
+    ...(product?.params || {}),
+    ...overrides,
+  };
+}
+
+/**
+ * Roll a product's components up into a per-base-unit cost.
+ *
+ * When a row has a formula it's re-evaluated live against the product's
+ * dims + params (+ any per-placement overrides, e.g. SHELFQTY bumped in
+ * takeoff). Rows without formulas — or whose formula fails to evaluate
+ * (e.g. this query didn't fetch params) — fall back to the cached
+ * per-base number, which was compiled with the defaults at save time.
+ */
+export function computeProductCost(product, overrides = {}) {
+  const vars = productVars(product, overrides);
+  const factor = instanceFactor(product?.unit || 'LF', vars.W, vars.H);
+
   const material = (product?.product_materials || []).reduce((sum, pm) => {
-    const qty   = Number(pm.qty_per_unit || 0);
+    let qty = NaN;
+    if (pm.qty_formula) qty = evalFormula(pm.qty_formula, vars) / factor;
+    if (!Number.isFinite(qty)) qty = Number(pm.qty_per_unit || 0);
     const cost  = Number(pm.material?.unit_cost || 0);
     const waste = Number(pm.waste_pct || 0) > 0
       ? Number(pm.waste_pct)
@@ -20,7 +46,9 @@ export function computeProductCost(product) {
   }, 0);
 
   const labor = (product?.product_labor || []).reduce((sum, pl) => {
-    const hrs  = Number(pl.hours_per_unit || 0);
+    let hrs = NaN;
+    if (pl.hours_formula) hrs = evalFormula(pl.hours_formula, vars) / factor;
+    if (!Number.isFinite(hrs)) hrs = Number(pl.hours_per_unit || 0);
     const rate = Number(pl.rate?.hourly_rate || 0);
     return sum + hrs * rate;
   }, 0);
