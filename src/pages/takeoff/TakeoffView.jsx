@@ -89,6 +89,13 @@ export default function TakeoffView() {
   const imgRef     = useRef(null);   // image-mode source for wall picking
   const pdfRef     = useRef(null);   // pdf.js document
   const renderTask = useRef(null);
+  const containerRef = useRef(null); // scrollable viewport (wheel zoom, fit)
+  const fittedRef  = useRef({});     // "<file>:<page>" -> true once auto-fitted
+  const zoomRef    = useRef(1);      // live zoom for native wheel handler
+  const pendingScroll = useRef(null);// scroll compensation after zoom change
+  const snapRef    = useRef(null);   // { grid: Map, cell } of vector endpoints
+
+  const PAD = 16;                    // inner padding around the sheet
 
   const [file, setFile]         = useState(null);   // project_files row
   const [signedUrl, setSigned]  = useState(null);
@@ -106,6 +113,7 @@ export default function TakeoffView() {
   const [productId, setProductId] = useState('');
   const [paramValues, setParamValues] = useState({}); // per-placement param knobs
   const [draft, setDraft]         = useState([]);   // in-progress points (units)
+  const [hover, setHover]         = useState(null); // { pt: [x,y], snap: 'vector'|'item'|'ortho'|null }
   const [selected, setSelected]   = useState(null); // takeoff item id
   const [err, setErr]             = useState('');
   const [busy, setBusy]           = useState(false);
@@ -171,9 +179,174 @@ export default function TakeoffView() {
   }, [signedUrl, isImage, page, zoom]);
 
   useEffect(() => { renderPage(); }, [renderPage]);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
   const onImgLoad = (e) => {
     setPageSize({ w: e.target.naturalWidth, h: e.target.naturalHeight });
+  };
+
+  // ---------- fit to window on open (once per file/page) ----------
+  useEffect(() => {
+    const el = containerRef.current;
+    const key = `${fileId}:${page}`;
+    if (!el || !pageSize.w || fittedRef.current[key]) return;
+    const fit = Math.min(
+      (el.clientWidth - PAD * 2) / pageSize.w,
+      (el.clientHeight - PAD * 2) / pageSize.h
+    );
+    if (Number.isFinite(fit) && fit > 0) {
+      fittedRef.current[key] = true;
+      setZoom(Math.max(0.1, Math.min(4, +fit.toFixed(3))));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageSize.w, pageSize.h, page, fileId]);
+
+  // ---------- wheel zoom centered on the cursor ----------
+  // Native non-passive listener: React's synthetic wheel can't preventDefault.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const z = zoomRef.current;
+      const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+      const next = Math.max(0.1, Math.min(8, +(z * factor).toFixed(4)));
+      if (next === z) return;
+      const rect = el.getBoundingClientRect();
+      // Keep the sheet point under the cursor stationary after the zoom.
+      const unitX = (e.clientX - rect.left + el.scrollLeft - PAD) / z;
+      const unitY = (e.clientY - rect.top  + el.scrollTop  - PAD) / z;
+      pendingScroll.current = { unitX, unitY, cx: e.clientX - rect.left, cy: e.clientY - rect.top };
+      setZoom(next);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Apply the scroll compensation right after the zoom re-render.
+  useEffect(() => {
+    const el = containerRef.current;
+    const p = pendingScroll.current;
+    if (!el || !p) return;
+    pendingScroll.current = null;
+    el.scrollLeft = p.unitX * zoom + PAD - p.cx;
+    el.scrollTop  = p.unitY * zoom + PAD - p.cy;
+  }, [zoom]);
+
+  // ---------- vector endpoint snap index (once per PDF page) ----------
+  useEffect(() => {
+    snapRef.current = null;
+    if (!signedUrl || isImage) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!pdfRef.current) return;   // renderPage populates it
+        const pdfPage = await pdfRef.current.getPage(page);
+        const OPS = pdfjsLib.OPS;
+        const viewport = pdfPage.getViewport({ scale: 1 });
+        const opList = await pdfPage.getOperatorList();
+        if (cancelled) return;
+
+        const CELL = 8;
+        const grid = new Map();
+        let count = 0;
+        const push = (x, y) => {
+          if (count > 60000) return;
+          const k = `${Math.round(x / CELL)},${Math.round(y / CELL)}`;
+          const arr = grid.get(k);
+          if (arr) arr.push([x, y]); else grid.set(k, [[x, y]]);
+          count++;
+        };
+
+        let ctm = [1, 0, 0, 1, 0, 0];
+        const stack = [];
+        const mul = (m, n) => [
+          m[0]*n[0]+m[2]*n[1], m[1]*n[0]+m[3]*n[1],
+          m[0]*n[2]+m[2]*n[3], m[1]*n[2]+m[3]*n[3],
+          m[0]*n[4]+m[2]*n[5]+m[4], m[1]*n[4]+m[3]*n[5]+m[5],
+        ];
+        const toV = (x, y) => viewport.convertToViewportPoint(
+          ctm[0]*x + ctm[2]*y + ctm[4], ctm[1]*x + ctm[3]*y + ctm[5]
+        );
+
+        for (let i = 0; i < opList.fnArray.length && count <= 60000; i++) {
+          const fn = opList.fnArray[i];
+          const args = opList.argsArray[i];
+          if (fn === OPS.save)      { stack.push(ctm); continue; }
+          if (fn === OPS.restore)   { ctm = stack.pop() || [1,0,0,1,0,0]; continue; }
+          if (fn === OPS.transform) { ctm = mul(ctm, args); continue; }
+          if (fn !== OPS.constructPath) continue;
+          try {
+            const [ops, coords] = args;
+            let k = 0;
+            for (const op of ops) {
+              if (op === OPS.moveTo || op === OPS.lineTo) {
+                const [vx, vy] = toV(coords[k], coords[k+1]); k += 2; push(vx, vy);
+              } else if (op === OPS.curveTo) {
+                const [vx, vy] = toV(coords[k+4], coords[k+5]); k += 6; push(vx, vy);
+              } else if (op === OPS.curveTo2 || op === OPS.curveTo3) {
+                const [vx, vy] = toV(coords[k+2], coords[k+3]); k += 4; push(vx, vy);
+              } else if (op === OPS.rectangle) {
+                const [x, y, w, h] = [coords[k], coords[k+1], coords[k+2], coords[k+3]]; k += 4;
+                for (const [px, py] of [[x,y],[x+w,y],[x+w,y+h],[x,y+h]]) {
+                  const [vx, vy] = toV(px, py); push(vx, vy);
+                }
+              }
+            }
+          } catch { /* skip malformed path */ }
+        }
+        if (!cancelled && count > 0) snapRef.current = { grid, cell: CELL };
+      } catch { /* raster/scan PDFs: no vectors, no vector snap */ }
+    })();
+    return () => { cancelled = true; };
+  }, [signedUrl, isImage, page, pageSize.w]);
+
+  // ---------- snapping ----------
+  const DRAW_TOOLS = ['calibrate', 'count', 'linear', 'area', 'wall'];
+  const snapPoint = (pt) => {
+    const tol = 10 / zoom;   // ~10 screen px
+
+    // 1. Vector endpoints from the PDF's own geometry — exact points.
+    const s = snapRef.current;
+    if (s) {
+      const cx = Math.round(pt[0] / s.cell), cy = Math.round(pt[1] / s.cell);
+      let best = null, bestD = tol;
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const arr = s.grid.get(`${cx + dx},${cy + dy}`);
+          if (!arr) continue;
+          for (const p of arr) {
+            const d = Math.hypot(p[0] - pt[0], p[1] - pt[1]);
+            if (d < bestD) { bestD = d; best = p; }
+          }
+        }
+      }
+      if (best) return { pt: [best[0], best[1]], snap: 'vector' };
+    }
+
+    // 2. Endpoints of existing takeoff geometry + the draft's own points
+    //    (lets you close areas and continue runs exactly).
+    let best = null, bestD = tol;
+    const consider = (p) => {
+      const d = Math.hypot(p[0] - pt[0], p[1] - pt[1]);
+      if (d < bestD) { bestD = d; best = p; }
+    };
+    for (const it of items) {
+      if (it.page !== page) continue;
+      for (const p of (it.points || [])) consider(p);
+    }
+    for (const p of draft) consider(p);
+    if (best) return { pt: [best[0], best[1]], snap: 'item' };
+
+    // 3. Ortho: lock to horizontal/vertical off the last draft point.
+    if (draft.length > 0 && tool !== 'count') {
+      const last = draft[draft.length - 1];
+      const dx = pt[0] - last[0], dy = pt[1] - last[1];
+      if (Math.abs(dy) <= Math.abs(dx) * 0.12) return { pt: [pt[0], last[1]], snap: 'ortho' };
+      if (Math.abs(dx) <= Math.abs(dy) * 0.12) return { pt: [last[0], pt[1]], snap: 'ortho' };
+    }
+
+    return { pt, snap: null };
   };
 
   // ---------- coordinate transforms ----------
@@ -229,8 +402,17 @@ export default function TakeoffView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tool, draft, ftPerUnit, productId, page]);
 
+  const onOverlayMove = (evt) => {
+    if (!DRAW_TOOLS.includes(tool) && tool !== 'pickwall' && tool !== 'region') { setHover(null); return; }
+    const raw = toUnits(evt);
+    if (DRAW_TOOLS.includes(tool)) setHover(snapPoint(raw));
+    else setHover({ pt: raw, snap: null });
+  };
+
   const onOverlayClick = async (evt) => {
-    const pt = toUnits(evt);
+    const raw = toUnits(evt);
+    // Snap drawing clicks to exact geometry; other tools use the raw point.
+    const pt = DRAW_TOOLS.includes(tool) ? snapPoint(raw).pt : raw;
 
     if (tool === 'calibrate') {
       if (draft.length === 0) { setDraft([pt]); return; }
@@ -430,8 +612,8 @@ export default function TakeoffView() {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 0, height: 'calc(100vh - 56px)' }}>
       {/* ============ canvas area ============ */}
-      <div style={{ overflow: 'auto', background: '#3A3F3C', position: 'relative' }}>
-        <div style={{ padding: 16, display: 'inline-block' }}>
+      <div ref={containerRef} style={{ overflow: 'auto', background: '#3A3F3C', position: 'relative', overscrollBehavior: 'contain' }}>
+        <div style={{ padding: PAD, display: 'inline-block' }}>
           <div style={{ position: 'relative', boxShadow: '0 4px 24px rgba(0,0,0,0.4)' }}>
             {isImage ? (
               <img
@@ -453,6 +635,8 @@ export default function TakeoffView() {
               height={pageSize.h * zoom}
               onClick={onOverlayClick}
               onDoubleClick={onOverlayDblClick}
+              onMouseMove={onOverlayMove}
+              onMouseLeave={() => setHover(null)}
               style={{
                 position: 'absolute', inset: 0,
                 cursor: tool === 'select' ? 'default' : 'crosshair',
@@ -525,6 +709,33 @@ export default function TakeoffView() {
                   ))}
                 </g>
               )}
+
+              {/* rubber band from last draft point to (snapped) cursor */}
+              {hover && draft.length > 0 && tool !== 'count' && (
+                <line
+                  x1={draft[draft.length - 1][0] * zoom} y1={draft[draft.length - 1][1] * zoom}
+                  x2={hover.pt[0] * zoom} y2={hover.pt[1] * zoom}
+                  stroke={hover.snap === 'ortho' ? '#40C4FF' : '#FFD54A'}
+                  strokeWidth={1.5} strokeDasharray="4 4"
+                />
+              )}
+
+              {/* snap indicator */}
+              {hover && DRAW_TOOLS.includes(tool) && (
+                hover.snap === 'vector' || hover.snap === 'item' ? (
+                  <g>
+                    <circle cx={hover.pt[0] * zoom} cy={hover.pt[1] * zoom} r={7}
+                      fill="none" stroke={hover.snap === 'vector' ? '#00C853' : '#FFD54A'} strokeWidth={2} />
+                    <circle cx={hover.pt[0] * zoom} cy={hover.pt[1] * zoom} r={2}
+                      fill={hover.snap === 'vector' ? '#00C853' : '#FFD54A'} />
+                  </g>
+                ) : hover.snap === 'ortho' ? (
+                  <g stroke="#40C4FF" strokeWidth={1.5}>
+                    <line x1={hover.pt[0] * zoom - 7} y1={hover.pt[1] * zoom} x2={hover.pt[0] * zoom + 7} y2={hover.pt[1] * zoom} />
+                    <line x1={hover.pt[0] * zoom} y1={hover.pt[1] * zoom - 7} x2={hover.pt[0] * zoom} y2={hover.pt[1] * zoom + 7} />
+                  </g>
+                ) : null
+              )}
             </svg>
           </div>
         </div>
@@ -547,7 +758,17 @@ export default function TakeoffView() {
             </>
           )}
           <span style={{ flex: 1 }} />
-          <button className="btn sm ghost" onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.2).toFixed(2)))}>−</button>
+          <button
+            className="btn sm ghost"
+            title="Fit to window"
+            onClick={() => {
+              const el = containerRef.current;
+              if (!el || !pageSize.w) return;
+              const fit = Math.min((el.clientWidth - PAD * 2) / pageSize.w, (el.clientHeight - PAD * 2) / pageSize.h);
+              if (Number.isFinite(fit) && fit > 0) setZoom(+fit.toFixed(3));
+            }}
+          >Fit</button>
+          <button className="btn sm ghost" onClick={() => setZoom((z) => Math.max(0.1, +(z - 0.2).toFixed(2)))}>−</button>
           <span style={{ fontSize: 12.5, width: 42, textAlign: 'center' }}>{Math.round(zoom * 100)}%</span>
           <button className="btn sm ghost" onClick={() => setZoom((z) => Math.min(4, +(z + 0.2).toFixed(2)))}>+</button>
         </div>
