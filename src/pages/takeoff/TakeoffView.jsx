@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import * as pdfjsLib from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { supabase } from '../../lib/supabase.js';
-import { computeProductCost } from '../../lib/productCost.js';
+import { computeProductCost, convertToBase } from '../../lib/productCost.js';
 import { autoTraceWall } from '../../lib/traceWall.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -119,7 +119,7 @@ export default function TakeoffView() {
       const [f, pd] = await Promise.all([
         supabase.from('project_files').select('*').eq('id', fileId).maybeSingle(),
         supabase.from('products').select(`
-          id, name, category, unit,
+          id, name, category, unit, default_width_ft, default_height_ft,
           product_materials ( qty_per_unit, waste_pct, material:material_id ( unit_cost, waste_pct ) ),
           product_labor     ( hours_per_unit, rate:labor_rate_id ( hourly_rate ) )
         `).order('name'),
@@ -341,12 +341,16 @@ export default function TakeoffView() {
   // ---------- aggregation ----------
   const productById = useMemo(() => Object.fromEntries(products.map((p) => [p.id, p])), [products]);
 
+  // Totals per product, converted from each item's measured quantity
+  // (EA/LF/SF depending on tool) into the product's BASE unit via its
+  // default dimensions — one product, measured any way.
   const groups = useMemo(() => {
     const g = {};
     for (const it of items) {
       const key = it.product_id || '_none';
-      if (!g[key]) g[key] = { product: productById[it.product_id], qty: 0, count: 0 };
-      g[key].qty += Number(it.qty || 0);
+      const p = productById[it.product_id];
+      if (!g[key]) g[key] = { product: p, qty: 0, count: 0 };
+      g[key].qty += p ? convertToBase(p, it.tool, it.qty) : Number(it.qty || 0);
       g[key].count += 1;
     }
     return g;
@@ -391,20 +395,9 @@ export default function TakeoffView() {
     nav(`/estimates/${est.id}`);
   };
 
-  // ---------- product filter per tool ----------
-  const pickableProducts = useMemo(() => {
-    const unit = TOOL_UNIT[tool];
-    if (!unit) return products;
-    return products.filter((p) => p.unit === unit);
-  }, [products, tool]);
-
-  // Keep the picked product valid for the tool.
-  useEffect(() => {
-    if (productId && (tool in TOOL_UNIT) && !pickableProducts.some((p) => p.id === productId)) {
-      setProductId(pickableProducts[0]?.id || '');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tool]);
+  // Every product works with every tool — measured qty converts to the
+  // product's base unit via its default dimensions.
+  const pickableProducts = products;
 
   // ---------- render ----------
   if (loading) return <div style={{ padding: 32 }} className="muted">Loading drawing…</div>;
@@ -572,11 +565,11 @@ export default function TakeoffView() {
         {(tool === 'count' || tool === 'linear' || tool === 'area') && (
           <div>
             <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--text-muted)', marginBottom: 6 }}>
-              Product ({TOOL_UNIT[tool]})
+              Product <span style={{ fontWeight: 400 }}>(measuring {TOOL_UNIT[tool]} → converts to product's base unit)</span>
             </div>
             {pickableProducts.length === 0 ? (
               <div className="muted" style={{ fontSize: 12.5 }}>
-                No {TOOL_UNIT[tool]} products yet. <Link to="/products/new">Create one →</Link>
+                No products yet. <Link to="/products/new/edit">Create one →</Link>
               </div>
             ) : (
               <select

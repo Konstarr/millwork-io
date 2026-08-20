@@ -56,7 +56,7 @@ export default function ProductsList() {
           <p>{loading ? 'Loading…' : `${filtered.length} of ${rows.length} assemblies`}</p>
         </div>
         <div className="page-head-actions">
-          <button className="btn primary" onClick={() => nav('/products/new')}>+ New product</button>
+          <button className="btn primary" onClick={() => nav('/products/new/edit')}>+ New product</button>
         </div>
       </div>
 
@@ -73,7 +73,7 @@ export default function ProductsList() {
       ) : filtered.length === 0 ? (
         <div className="empty">
           {rows.length === 0
-            ? <>No products yet. Build your first assembly — a base cabinet, die wall, paneling system, or trim run. <Link to="/products/new">Create one →</Link></>
+            ? <>No products yet. Build your first assembly — a base cabinet, die wall, paneling system, or trim run. <Link to="/products/new/edit">Create one →</Link></>
             : 'No products match these filters.'}
         </div>
       ) : (
@@ -105,7 +105,7 @@ export default function ProductsList() {
                     <td className="right money">{c.labor.toFixed(2)}</td>
                     <td className="right money" style={{ fontWeight: 700 }}>{c.total.toFixed(2)}</td>
                     <td className="right">
-                      <Link to={`/products/${r.id}`} className="btn sm ghost">Edit →</Link>
+                      <Link to={`/products/${r.id}`} className="btn sm ghost">Overview →</Link>
                     </td>
                   </tr>
                 );

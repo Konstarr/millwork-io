@@ -20,8 +20,9 @@ import EstimateDetail from './pages/estimates/EstimateDetail.jsx';
 import MaterialsLibrary from './pages/materials/MaterialsLibrary.jsx';
 import LaborSettings    from './pages/labor/LaborSettings.jsx';
 
-import ProductsList  from './pages/products/ProductsList.jsx';
-import ProductDetail from './pages/products/ProductDetail.jsx';
+import ProductsList    from './pages/products/ProductsList.jsx';
+import ProductOverview from './pages/products/ProductOverview.jsx';
+import ProductDetail   from './pages/products/ProductDetail.jsx';
 // Lazy: pdf.js is heavy — only load it when the takeoff screen opens.
 const TakeoffView = lazy(() => import('./pages/takeoff/TakeoffView.jsx'));
 
@@ -48,8 +49,9 @@ export default function App() {
           <Route path="/estimates"        element={<EstimatesList />} />
           <Route path="/estimates/:id"    element={<EstimateDetail />} />
 
-          <Route path="/products"         element={<ProductsList />} />
-          <Route path="/products/:id"     element={<ProductDetail />} />
+          <Route path="/products"           element={<ProductsList />} />
+          <Route path="/products/:id"       element={<ProductOverview />} />
+          <Route path="/products/:id/edit"  element={<ProductDetail />} />
 
           <Route path="/materials"        element={<MaterialsLibrary />} />
           <Route path="/labor"            element={<LaborSettings />} />
