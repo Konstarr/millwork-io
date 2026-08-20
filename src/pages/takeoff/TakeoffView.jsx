@@ -33,9 +33,8 @@ const TOOLS = [
   { id: 'count',     label: 'Count',     hint: 'Click to place each unit (EA products)' },
   { id: 'linear',    label: 'Linear',    hint: 'Click vertices; double-click or Enter to finish (LF products)' },
   { id: 'area',      label: 'Area',      hint: 'Click vertices; double-click to close (SF products)' },
-  { id: 'wall',      label: 'Wall',      hint: 'Trace wall centerlines; double-click to finish. Powers the 3D view.' },
+  { id: 'wall',      label: 'Wall',      hint: 'Trace wall centerlines (LF); double-click to finish' },
   { id: 'pickwall',  label: 'Wall pick', hint: 'Click directly on a wall line — it auto-traces its full length' },
-  { id: 'region',    label: 'Plan area', hint: 'Click two corners to designate the floor plan for 3D' },
 ];
 
 const TOOL_UNIT = { count: 'EA', linear: 'LF', area: 'SF' };
@@ -296,23 +295,6 @@ export default function TakeoffView() {
       return;
     }
 
-    if (tool === 'region') {
-      if (draft.length === 0) { setDraft([pt]); return; }
-      const p0 = draft[0];
-      setDraft([]);
-      const rect = {
-        x: Math.min(p0[0], pt[0]),
-        y: Math.min(p0[1], pt[1]),
-        w: Math.abs(pt[0] - p0[0]),
-        h: Math.abs(pt[1] - p0[1]),
-      };
-      if (rect.w < 10 || rect.h < 10) return;
-      const next = { ...(file.plan_regions || {}), [page]: rect };
-      setFile((f) => ({ ...f, plan_regions: next }));
-      await supabase.from('project_files').update({ plan_regions: next }).eq('id', fileId);
-      return;
-    }
-
     if (tool === 'select') {
       // Hit test: nearest item within ~8 screen px.
       const tol = 8 / zoom;
@@ -508,21 +490,10 @@ export default function TakeoffView() {
                 );
               })}
 
-              {/* designated floor-plan region */}
-              {file.plan_regions?.[page] && (() => {
-                const r = file.plan_regions[page];
-                return (
-                  <rect
-                    x={r.x * zoom} y={r.y * zoom} width={r.w * zoom} height={r.h * zoom}
-                    fill="none" stroke="#7E57C2" strokeWidth={2.5} strokeDasharray="10 6"
-                  />
-                );
-              })()}
-
               {/* in-progress draft */}
               {draft.length > 0 && (
                 <g>
-                  {(tool === 'linear' || tool === 'calibrate' || tool === 'wall' || tool === 'region') && (
+                  {(tool === 'linear' || tool === 'calibrate' || tool === 'wall') && (
                     <polyline
                       points={draft.map(([x, y]) => `${x * zoom},${y * zoom}`).join(' ')}
                       fill="none" stroke="#FFD54A" strokeWidth={2} strokeDasharray="6 4"
@@ -686,14 +657,6 @@ export default function TakeoffView() {
           )}
         </div>
 
-        <Link
-          to={`/takeoff3d/${fileId}?page=${page}`}
-          className="btn"
-          style={{ textAlign: 'center' }}
-          title={ftPerUnit ? 'Extrude walls and view products in 3D' : 'Calibrate the scale first'}
-        >
-          View in 3D ⌁
-        </Link>
         <button className="btn primary" onClick={sendToEstimate} disabled={busy}>
           {busy ? 'Sending…' : 'Send totals to estimate →'}
         </button>

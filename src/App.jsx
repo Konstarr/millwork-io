@@ -22,9 +22,8 @@ import LaborSettings    from './pages/labor/LaborSettings.jsx';
 
 import ProductsList  from './pages/products/ProductsList.jsx';
 import ProductDetail from './pages/products/ProductDetail.jsx';
-// Lazy: pdf.js and three.js are heavy — only load when a takeoff screen opens.
+// Lazy: pdf.js is heavy — only load it when the takeoff screen opens.
 const TakeoffView = lazy(() => import('./pages/takeoff/TakeoffView.jsx'));
-const Takeoff3D   = lazy(() => import('./pages/takeoff/Takeoff3D.jsx'));
 
 export default function App() {
   return (
@@ -60,14 +59,6 @@ export default function App() {
             element={
               <Suspense fallback={<div style={{ padding: 32 }} className="muted">Loading takeoff…</div>}>
                 <TakeoffView />
-              </Suspense>
-            }
-          />
-          <Route
-            path="/takeoff3d/:fileId"
-            element={
-              <Suspense fallback={<div style={{ padding: 32 }} className="muted">Loading 3D…</div>}>
-                <Takeoff3D />
               </Suspense>
             }
           />
