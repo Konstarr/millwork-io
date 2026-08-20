@@ -15,6 +15,32 @@ const emptyRate = () => ({
   category: '',
 });
 
+/**
+ * The standard millwork shop roster. One click loads every role — the
+ * estimator just types the $ amounts. Default rates follow the reference
+ * workbook's labor takeoff (PM 100, Drafting/Eng 40, shop trades 30,
+ * Shipping 25, Install 75); everything is editable before saving.
+ */
+const STANDARD_ROLES = [
+  { name: 'Project Management',     category: 'Office', hourly_rate: 100 },
+  { name: 'Drafting',               category: 'Office', hourly_rate: 40 },
+  { name: 'Engineering',            category: 'Office', hourly_rate: 40 },
+  { name: 'CNC Programming',        category: 'Office', hourly_rate: 40 },
+  { name: 'Saw / Panel Cutting',    category: 'Shop',   hourly_rate: 30 },
+  { name: 'CNC / Machining',        category: 'Shop',   hourly_rate: 30 },
+  { name: 'Edgebanding',            category: 'Shop',   hourly_rate: 30 },
+  { name: 'Assembly / Benchwork',   category: 'Shop',   hourly_rate: 30 },
+  { name: 'Lamination',             category: 'Shop',   hourly_rate: 30 },
+  { name: 'Veneer / Pressing',      category: 'Shop',   hourly_rate: 30 },
+  { name: 'Hardware',               category: 'Shop',   hourly_rate: 30 },
+  { name: 'Sanding',                category: 'Shop',   hourly_rate: 30 },
+  { name: 'Finishing',              category: 'Shop',   hourly_rate: 30 },
+  { name: 'Shipping / Crating',     category: 'Shop',   hourly_rate: 25 },
+  { name: 'Delivery',               category: 'Field',  hourly_rate: 25 },
+  { name: 'Field Measure',          category: 'Field',  hourly_rate: 75 },
+  { name: 'Install',                category: 'Field',  hourly_rate: 75 },
+];
+
 export default function LaborSettings() {
   const [rates, setRates] = useState([]);
   const [dirty, setDirty] = useState(new Set());
@@ -58,6 +84,19 @@ export default function LaborSettings() {
   };
 
   const setOrgField = (k, v) => setOrg((o) => ({ ...o, [k]: v }));
+
+  // Load the standard roster as unsaved rows (skipping names that already
+  // exist), so the estimator adjusts $ amounts and hits Save once.
+  const loadStandardRoles = () => {
+    const existing = new Set(rates.filter((r) => !deleted.has(r.id)).map((r) => r.name.toLowerCase()));
+    const toAdd = STANDARD_ROLES
+      .filter((s) => !existing.has(s.name.toLowerCase()))
+      .map((s) => ({ id: crypto.randomUUID(), _new: true, ...s }));
+    if (!toAdd.length) { setMsg('All standard roles are already in the list.'); return; }
+    setRates((rs) => [...rs, ...toAdd]);
+    setDirty((d) => { const n = new Set(d); toAdd.forEach((r) => n.add(r.id)); return n; });
+    setMsg(`Added ${toAdd.length} standard roles — adjust the rates, then Save.`);
+  };
 
   const saveAll = async () => {
     setSaving(true); setErr(''); setMsg('');
@@ -139,13 +178,28 @@ export default function LaborSettings() {
       <div className="panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <h2 style={{ margin: 0 }}>Labor rates</h2>
-          <button className="btn sm" onClick={add}>+ Add rate</button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button className="btn sm ghost" onClick={loadStandardRoles}>Load standard millwork roles</button>
+            <button className="btn sm" onClick={add}>+ Add rate</button>
+          </div>
         </div>
 
         {loading ? (
           <div className="muted">Loading…</div>
         ) : rates.filter((r) => !deleted.has(r.id)).length === 0 ? (
-          <div className="empty">No labor rates yet. Add rates for Cabinetmaker, Installer, CNC, etc.</div>
+          <div className="panel" style={{ background: '#F5EAD6', borderColor: '#E5D6B0' }}>
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 300px' }}>
+                <h3 style={{ marginBottom: 4 }}>Start with the standard millwork roster</h3>
+                <div className="muted" style={{ fontSize: 13 }}>
+                  Project Management, Drafting, Engineering, CNC Programming, Saw, CNC/Machining,
+                  Edgebanding, Assembly, Lamination, Veneer, Hardware, Sanding, Finishing,
+                  Shipping, Delivery, Field Measure, and Install — pre-loaded, you just set the $ rates.
+                </div>
+              </div>
+              <button className="btn primary" onClick={loadStandardRoles}>Load all 17 roles</button>
+            </div>
+          </div>
         ) : (
           <div className="tbl-wrap">
             <table className="tbl">
