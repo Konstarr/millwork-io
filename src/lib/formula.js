@@ -28,8 +28,13 @@ export function evalFormula(expr, vars = {}) {
     if (/[0-9.]/.test(c)) {
       let j = i;
       while (j < src.length && /[0-9.]/.test(src[j])) j++;
-      const n = Number(src.slice(i, j));
+      let n = Number(src.slice(i, j));
       if (!Number.isFinite(n)) return NaN;
+      // Unit suffixes: 4" = 4 inches (converted to feet); 4' = 4 feet.
+      // Curly quotes from autocorrect count too.
+      const suf = src[j];
+      if (suf === '"' || suf === '”' || suf === '″') { n = n / 12; j++; }
+      else if (suf === "'" || suf === '’' || suf === '′') { j++; }
       tokens.push({ t: 'num', v: n });
       i = j;
       continue;
@@ -37,7 +42,11 @@ export function evalFormula(expr, vars = {}) {
     if (/[A-Za-z_]/.test(c)) {
       let j = i;
       while (j < src.length && /[A-Za-z_0-9]/.test(src[j])) j++;
-      tokens.push({ t: 'var', v: src.slice(i, j).toUpperCase() });
+      const word = src.slice(i, j).toUpperCase();
+      // Estimators write "x" for multiply: (W * 4") x 4. X is not a
+      // dimension variable, so treat it as the * operator.
+      if (word === 'X') tokens.push({ t: '*' });
+      else tokens.push({ t: 'var', v: word });
       i = j;
       continue;
     }

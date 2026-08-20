@@ -143,7 +143,8 @@ export default function ProductDetail() {
     'Case Top/Bottom': 'W * D * 2',
     'Case Back': 'W * H',
     'Shelves': 'W * D',
-    'Toe Kick': 'W',
+    'Stretchers': '(W * 4") * 4',
+    'Toe Kick': 'W * 4"',
     'Doors': 'W * H',
     'Drawer Fronts': 'W * H',
     'Panel Face': 'W * H',
@@ -345,7 +346,9 @@ export default function ProductDetail() {
             <p className="muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
               Component and labor formulas below are <b>per one product</b> and can use its dimensions:
               {' '}<code>W</code> = {dims.W}′ width, <code>H</code> = {dims.H}′ height, <code>D</code> = {dims.D}′ depth.
-              Example: Case Sides = <code>H * D * 2</code>. The system converts to cost per {form.unit} automatically
+              Hard measurements work too: <code>4"</code> = 4 inches, <code>2'</code> = 2 feet, and <code>x</code> multiplies.
+              Examples: Case Sides = <code>H * D * 2</code> · Stretchers = <code>(W * 4") x 4</code>.
+              The system converts to cost per {form.unit} automatically
               {form.unit === 'LF' && <> (÷ {dims.W}′ width)</>}
               {form.unit === 'SF' && <> (÷ {dims.W}′ × {dims.H}′ face)</>}.
             </p>
